@@ -11,7 +11,22 @@ interface BridgeState {
 }
 
 const MAX_TERMINAL_LINES = 200;
-const PORT = 19854;
+
+// Each IDE gets its own port so they can run simultaneously
+// Windsurf: 19854, Antigravity: 19855, Cursor: 19856
+function detectPort(): number {
+    const appName = vscode.env.appName.toLowerCase();
+    if (appName.includes('antigravity')) return 19855;
+    if (appName.includes('cursor')) return 19856;
+    return 19854; // Windsurf / default
+}
+
+function detectIDE(): string {
+    const appName = vscode.env.appName.toLowerCase();
+    if (appName.includes('antigravity')) return 'antigravity';
+    if (appName.includes('cursor')) return 'cursor';
+    return 'windsurf';
+}
 
 let state: BridgeState = {
     terminalLines: [],
@@ -75,8 +90,8 @@ export function activate(context: vscode.ExtensionContext) {
             res.end(JSON.stringify({
                 bridge: 'foreman-bridge',
                 version: '0.1.0',
-                ide: 'windsurf',
-                port: PORT,
+                ide: detectIDE(),
+                port: detectPort(),
                 uptime: process.uptime(),
             }));
         } else if (req.url === '/output') {
@@ -108,14 +123,16 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    server.listen(PORT, '127.0.0.1', () => {
-        console.log(`Foreman Bridge HTTP server running on http://127.0.0.1:${PORT}`);
-        vscode.window.showInformationMessage(`Foreman Bridge active on port ${PORT}`);
+    const port = detectPort();
+    const ide = detectIDE();
+    server.listen(port, '127.0.0.1', () => {
+        console.log(`Foreman Bridge HTTP server running on http://127.0.0.1:${port}`);
+        vscode.window.showInformationMessage(`Foreman Bridge active on port ${port} (${ide})`);
     });
 
     server.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
-            console.log(`Port ${PORT} in use — Foreman Bridge already running?`);
+            console.log(`Port ${port} in use — Foreman Bridge already running?`);
         } else {
             console.error('Foreman Bridge server error:', err);
         }
