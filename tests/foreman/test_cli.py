@@ -1,5 +1,6 @@
 import pytest
 from click.testing import CliRunner
+
 from foreman.cli import cli
 
 
@@ -10,7 +11,7 @@ def runner():
 
 def test_status_no_state(runner, tmp_path):
     result = runner.invoke(cli, ["status", "--state-file", str(tmp_path / "nope.json")])
-    assert "No active supervisor session" in result.output
+    assert "No active foreman session" in result.output
 
 
 def test_status_with_state(runner, tmp_path):

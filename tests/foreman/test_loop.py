@@ -1,4 +1,4 @@
-"""Tests for the supervisor loop orchestrator — mechanical parts only."""
+"""Tests for the foreman loop orchestrator — mechanical parts only."""
 
 import json
 import pytest
@@ -115,7 +115,7 @@ def test_dispatch_returns_none_when_all_done(initialized_loop):
 def test_mark_clean(initialized_loop):
     initialized_loop.dispatch_next()
     msg = initialized_loop.mark_clean()
-    assert "✅" in msg or "done" in msg.lower()
+    assert "🏆" in msg or "KO" in msg
     assert initialized_loop.state.tasks[0].status == TaskStatus.COMPLETED
     assert initialized_loop.state.tasks[0].result == "clean"
 
@@ -140,6 +140,7 @@ def test_mark_takeover(initialized_loop):
     initialized_loop.dispatch_next()
     msg = initialized_loop.mark_takeover(lines_changed=12)
     assert "12 lines" in msg
+    assert "🔔" in msg or "Corner steps in" in msg
     assert initialized_loop.state.tasks[0].result == "takeover"
 
 
@@ -167,7 +168,7 @@ def test_complete_updates_learnings(initialized_loop, tmp_path):
         task.status = TaskStatus.COMPLETED
         task.result = "clean"
     msg = initialized_loop.complete()
-    assert "🏁" in msg or "complete" in msg.lower()
+    assert "�" in msg or "FIGHT OVER" in msg
     # Learnings file should exist
     learnings_path = tmp_path / "learnings.json"
     assert learnings_path.exists()

@@ -1,5 +1,6 @@
 import pytest
-from foreman.config import SupervisorConfig, IDEConfig, ModelInfo
+
+from foreman.config import IDEConfig, ModelInfo, SupervisorConfig
 
 
 def test_default_config_has_windsurf_and_antigravity():
@@ -38,9 +39,17 @@ def test_antigravity_worktree_path():
 
 def test_config_state_file_path():
     config = SupervisorConfig.default()
-    assert config.state_file == "~/.claude/supervisor-state.json"
+    assert config.state_file == "~/.claude/foreman-state.json"
 
 
 def test_config_learnings_file_path():
     config = SupervisorConfig.default()
-    assert config.learnings_file == "~/.claude/supervisor-learnings.json"
+    assert config.learnings_file == "~/.claude/foreman-learnings.json"
+
+
+def test_cursor_ide_config():
+    config = SupervisorConfig.default()
+    assert "cursor" in config.ides
+    cursor = config.ides["cursor"]
+    assert cursor.process_name == "Cursor"
+    assert cursor.bridge_type == "cursor"
