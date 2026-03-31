@@ -13,12 +13,25 @@ on run argv
 
             if action is "send" then
                 set prompt to item 2 of argv
+                -- mode: "continue" uses existing Cascade (Shift+Cmd+C)
+                --        "new" creates fresh Cascade window (Shift+Cmd+I)
+                set mode to "continue"
+                if (count of argv) > 2 then
+                    set mode to item 3 of argv
+                end if
+
                 -- Save current clipboard, use it to paste (faster than keystroke)
                 set the clipboard to prompt
-                -- Focus the Cascade input area (Cmd+L opens Cascade)
-                keystroke "l" using command down
-                delay 0.5
-                -- Clear any existing text
+
+                if mode is "new" then
+                    -- Shift+Cmd+I = new Cascade window
+                    keystroke "i" using {command down, shift down}
+                else
+                    -- Shift+Cmd+C = continue in existing Cascade
+                    keystroke "c" using {command down, shift down}
+                end if
+                delay 0.8
+                -- Clear any existing text in the input
                 keystroke "a" using command down
                 delay 0.1
                 -- Paste the prompt from clipboard
@@ -39,14 +52,11 @@ on run argv
                 return "idle"
 
             else if action is "read" then
-                -- Read from the Cascade output panel via clipboard
-                keystroke "l" using command down
-                delay 0.3
-                keystroke "a" using command down
-                delay 0.1
-                keystroke "c" using command down
-                delay 0.2
-                return (the clipboard)
+                -- Screenshot approach: Cascade is in an Electron WebView
+                -- that AppleScript can't read directly. Take a screenshot
+                -- for the supervisor (Claude) to read visually.
+                do shell script "screencapture -C -x /tmp/windsurf_cascade.png"
+                return "/tmp/windsurf_cascade.png"
 
             else if action is "accept" then
                 -- Click Accept All button
