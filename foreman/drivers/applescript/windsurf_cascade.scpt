@@ -4,23 +4,26 @@
 
 on run argv
     set action to item 1 of argv
+    set result to "unknown"
 
     tell application "System Events"
-        tell process "Windsurf"
+        tell (first process whose bundle identifier is "com.exafunction.windsurf")
             set frontmost to true
             delay 0.3
 
             if action is "send" then
                 set prompt to item 2 of argv
+                -- Save current clipboard, use it to paste (faster than keystroke)
+                set the clipboard to prompt
                 -- Focus the Cascade input area (Cmd+L opens Cascade)
                 keystroke "l" using command down
                 delay 0.5
                 -- Clear any existing text
                 keystroke "a" using command down
                 delay 0.1
-                -- Type the prompt
-                keystroke prompt
-                delay 0.2
+                -- Paste the prompt from clipboard
+                keystroke "v" using command down
+                delay 0.3
                 -- Press Enter to send
                 key code 36 -- Return
                 return "sent"
