@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-foreman"
+version = "0.1.0"
+description = "The heavyweight champion of autonomous coding. Claude thinks. Free models type. Foreman makes sure it's done right."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Hayssam Hoballah", email = "hayssam.hoballah@gmail.com" },
+]
+keywords = ["ai", "automation", "coding", "claude", "supervisor", "windsurf", "antigravity"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "click>=8.0",
+]
+
+[project.scripts]
+foreman = "foreman.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/DepolluteNow/claude-foreman"
+Repository = "https://github.com/DepolluteNow/claude-foreman"
+Issues = "https://github.com/DepolluteNow/claude-foreman/issues"
+"Depollute Now!" = "https://depollutenow.com"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
