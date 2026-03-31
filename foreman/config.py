@@ -20,8 +20,8 @@ class IDEConfig:
 @dataclass
 class SupervisorConfig:
     ides: dict[str, IDEConfig]
-    state_file: str = "~/.claude/supervisor-state.json"
-    learnings_file: str = "~/.claude/supervisor-learnings.json"
+    state_file: str = "~/.claude/foreman-state.json"
+    learnings_file: str = "~/.claude/foreman-learnings.json"
     poll_interval: int = 15
     stability_polls: int = 2
     max_retries: int = 2

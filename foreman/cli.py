@@ -1,42 +1,44 @@
-import click
 from pathlib import Path
+
+import click
+
 from foreman.config import SupervisorConfig
 from foreman.ring.state import SupervisorState
 
 
 @click.group()
 def cli():
-    """Autonomous Supervisor — route coding tasks to free AI models."""
+    """Autonomous Foreman — route coding tasks to free AI models."""
     pass
 
 
 @cli.command()
 @click.argument("goal")
-@click.option("--state-file", default="~/.claude/supervisor-state.json")
+@click.option("--state-file", default="~/.claude/foreman-state.json")
 def start(goal: str, state_file: str):
-    """Start a new supervisor session with the given goal."""
+    """Start a new foreman session with the given goal."""
     path = Path(state_file).expanduser()
     existing = SupervisorState.load(path)
     if existing and not existing.paused:
-        click.echo(f"Supervisor already active: {existing.goal}")
-        click.echo("Use 'supervisor resume' or 'supervisor stop' first.")
+        click.echo(f"Foreman already active: {existing.goal}")
+        click.echo("Use 'foreman resume' or 'foreman stop' first.")
         return
 
     state = SupervisorState.new(goal=goal)
     state.save(path)
-    click.echo(f"Supervisor started. Goal: {goal}")
+    click.echo(f"Foreman started. Goal: {goal}")
     click.echo(f"State file: {path}")
     click.echo("Run DECOMPOSE to create task specs.")
 
 
 @cli.command()
-@click.option("--state-file", default="~/.claude/supervisor-state.json")
+@click.option("--state-file", default="~/.claude/foreman-state.json")
 def resume(state_file: str):
-    """Resume a paused supervisor session."""
+    """Resume a paused foreman session."""
     path = Path(state_file).expanduser()
     state = SupervisorState.load(path)
     if not state:
-        click.echo("No supervisor session found.")
+        click.echo("No foreman session found.")
         return
     state.paused = False
     state.pause_reason = None
@@ -49,13 +51,13 @@ def resume(state_file: str):
 
 
 @cli.command()
-@click.option("--state-file", default="~/.claude/supervisor-state.json")
+@click.option("--state-file", default="~/.claude/foreman-state.json")
 def status(state_file: str):
-    """Show current supervisor status."""
+    """Show current foreman status."""
     path = Path(state_file).expanduser()
     state = SupervisorState.load(path)
     if not state:
-        click.echo("No active supervisor session.")
+        click.echo("No active foreman session.")
         return
 
     summary = state.progress_summary()
@@ -70,13 +72,13 @@ def status(state_file: str):
 
 
 @cli.command()
-@click.option("--state-file", default="~/.claude/supervisor-state.json")
+@click.option("--state-file", default="~/.claude/foreman-state.json")
 def stop(state_file: str):
-    """Stop and clear the supervisor session."""
+    """Stop and clear the foreman session."""
     path = Path(state_file).expanduser()
     if path.exists():
         path.unlink()
-        click.echo("Supervisor session cleared.")
+        click.echo("Foreman session cleared.")
     else:
         click.echo("No session to clear.")
 

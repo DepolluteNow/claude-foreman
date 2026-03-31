@@ -1,13 +1,13 @@
 """
-Supervisor Loop — The orchestrator.
+Foreman Loop — The orchestrator.
 
 This module provides the mechanical state machine that Claude drives via the SKILL.md protocol.
 Claude handles the intelligent parts (decompose, review, takeover); this module handles the
 state transitions, timing, dispatching, and persistence.
 
 Usage (from Claude Code skill):
-    from foreman.ring.loop import SupervisorLoop
-    loop = SupervisorLoop.from_defaults()
+    from foreman.ring.loop import ForemanLoop
+    loop = ForemanLoop.from_defaults()
     loop.initialize("implement user auth", task_specs)
     # ... Claude drives the loop via methods below
 """
@@ -20,19 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from foreman.comms.telegram import (format_completion, format_escalation,
+                                    format_takeover, format_task_done,
+                                    format_task_start)
 from foreman.config import SupervisorConfig
-from foreman.ring.state import SupervisorState, TaskState, TaskStatus
-from foreman.ring.router import TaskRouter
-from foreman.ring.watcher import FilesystemWatcher, WatchResult
-from foreman.ring.takeover import CircleDetector, CircleType
 from foreman.ring.learnings import Learnings
-from foreman.comms.telegram import (
-    format_task_start,
-    format_task_done,
-    format_takeover,
-    format_escalation,
-    format_completion,
-)
+from foreman.ring.router import TaskRouter
+from foreman.ring.state import SupervisorState, TaskState, TaskStatus
+from foreman.ring.takeover import CircleDetector, CircleType
+from foreman.ring.watcher import FilesystemWatcher, WatchResult
 
 
 @dataclass
@@ -59,7 +55,7 @@ class DispatchResult:
 
 class SupervisorLoop:
     """
-    Mechanical state machine for the autonomous supervisor.
+    Mechanical state machine for the autonomous foreman.
 
     Claude drives this via SKILL.md. The loop handles:
     - State persistence (crash recovery)
@@ -107,7 +103,7 @@ class SupervisorLoop:
 
     def initialize(self, goal: str, task_specs: list[str]) -> str:
         """
-        Create a new supervisor session from decomposed task specs.
+        Create a new foreman session from decomposed task specs.
 
         Args:
             goal: The high-level goal (e.g., "implement user auth for DN")
