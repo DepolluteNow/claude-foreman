@@ -54,5 +54,15 @@ class SupervisorConfig:
                     default_model="gemini-3.1",
                     bridge_type="gemini",
                 ),
+                "cursor": IDEConfig(
+                    process_name="Cursor",
+                    worktree="~/CascadeProjects/dn-cursor",
+                    models=[
+                        ModelInfo("cursor-small", "fast", "free"),
+                        ModelInfo("gpt-4o", "medium", "cheap"),
+                    ],
+                    default_model="cursor-small",
+                    bridge_type="cursor",
+                ),
             }
         )

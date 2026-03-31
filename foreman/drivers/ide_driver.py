@@ -1,12 +1,13 @@
 from foreman.bridge_interface import AIBridge, AIBridgeError, AIStatus
-from foreman.drivers.cascade_bridge import CascadeBridge
-from foreman.drivers.gemini_bridge import GeminiBridge
 from foreman.config import SupervisorConfig
-
+from foreman.drivers.cascade_bridge import CascadeBridge
+from foreman.drivers.cursor_bridge import CursorBridge
+from foreman.drivers.gemini_bridge import GeminiBridge
 
 BRIDGE_REGISTRY = {
     "cascade": CascadeBridge,
     "gemini": GeminiBridge,
+    "cursor": CursorBridge,
 }
 
 
