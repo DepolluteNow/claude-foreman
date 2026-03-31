@@ -59,7 +59,12 @@ class IDEDriver:
             if not ide_config:
                 raise AIBridgeError(f"Unknown IDE: {ide_name}")
             bridge_cls = _load_bridge_class(ide_config.bridge_type)
-            self._bridges[ide_name] = bridge_cls()
+            # Pass ide_name so bridge knows which port to use
+            try:
+                self._bridges[ide_name] = bridge_cls(ide_name=ide_name)
+            except TypeError:
+                # Fallback for bridges that don't accept ide_name
+                self._bridges[ide_name] = bridge_cls()
         return self._bridges[ide_name]
 
     def send(self, ide: str, prompt: str) -> None:
