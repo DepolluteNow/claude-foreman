@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import * as http from 'http';
 import * as vscode from 'vscode';
 
@@ -7,6 +8,8 @@ interface BridgeState {
     activeFile: string | null;
     lastFileChange: string | null;
     lastFileChangeTime: number;
+    saveHistory: { file: string; time: number }[];
+    fileEvents: { type: string; file: string; time: number }[];
     status: 'idle' | 'busy';
 }
 
@@ -34,8 +37,20 @@ let state: BridgeState = {
     activeFile: null,
     lastFileChange: null,
     lastFileChangeTime: 0,
+    saveHistory: [],
+    fileEvents: [],
     status: 'idle',
 };
+
+function runGit(command: string): string {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) return '(no workspace)';
+    try {
+        return execSync(`git ${command}`, { cwd: workspaceRoot, timeout: 5000 }).toString().trim();
+    } catch {
+        return '(git error)';
+    }
+}
 
 let server: http.Server | null = null;
 
@@ -77,9 +92,35 @@ export function activate(context: vscode.ExtensionContext) {
 
     // ── File save tracking ──────────────────────────────────
     vscode.workspace.onDidSaveTextDocument(doc => {
-        state.lastFileChange = vscode.workspace.asRelativePath(doc.uri);
+        const file = vscode.workspace.asRelativePath(doc.uri);
+        state.lastFileChange = file;
         state.lastFileChangeTime = Date.now();
+        state.saveHistory.push({ file, time: Date.now() });
+        if (state.saveHistory.length > 50) state.saveHistory = state.saveHistory.slice(-50);
     }, null, context.subscriptions);
+
+    // ── Filesystem watcher ─────────────────────────────────
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*');
+
+    watcher.onDidCreate(uri => {
+        const entry = { type: 'create', file: vscode.workspace.asRelativePath(uri), time: Date.now() };
+        state.fileEvents.push(entry);
+        if (state.fileEvents.length > 100) state.fileEvents = state.fileEvents.slice(-100);
+    }, null, context.subscriptions);
+
+    watcher.onDidDelete(uri => {
+        const entry = { type: 'delete', file: vscode.workspace.asRelativePath(uri), time: Date.now() };
+        state.fileEvents.push(entry);
+        if (state.fileEvents.length > 100) state.fileEvents = state.fileEvents.slice(-100);
+    }, null, context.subscriptions);
+
+    watcher.onDidChange(uri => {
+        const entry = { type: 'change', file: vscode.workspace.asRelativePath(uri), time: Date.now() };
+        state.fileEvents.push(entry);
+        if (state.fileEvents.length > 100) state.fileEvents = state.fileEvents.slice(-100);
+    }, null, context.subscriptions);
+
+    context.subscriptions.push(watcher);
 
     // ── HTTP server ─────────────────────────────────────────
     server = http.createServer((req, res) => {
@@ -89,7 +130,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (req.url === '/status') {
             res.end(JSON.stringify({
                 bridge: 'foreman-bridge',
-                version: '0.1.0',
+                version: '0.2.0',
                 ide: detectIDE(),
                 port: detectPort(),
                 uptime: process.uptime(),
@@ -114,11 +155,35 @@ export function activate(context: vscode.ExtensionContext) {
             }));
         } else if (req.url === '/state') {
             res.end(JSON.stringify(state));
+        } else if (req.url === '/git') {
+            res.end(JSON.stringify({
+                status: runGit('status --short'),
+                diff: runGit('diff --stat HEAD'),
+                log: runGit('log --oneline -5'),
+                branch: runGit('branch --show-current'),
+            }));
+        } else if (req.url === '/files') {
+            res.end(JSON.stringify({
+                saves: state.saveHistory.slice(-20),
+                events: state.fileEvents.slice(-30),
+            }));
+        } else if (req.url === '/health') {
+            // Quick health check for Foreman polling
+            const sinceLastSave = state.lastFileChangeTime
+                ? Date.now() - state.lastFileChangeTime
+                : -1;
+            res.end(JSON.stringify({
+                alive: true,
+                ide: detectIDE(),
+                sinceLastSaveMs: sinceLastSave,
+                diagnosticCount: state.diagnostics.length,
+                errorCount: state.diagnostics.filter(d => d.severity === 'Error').length,
+            }));
         } else {
             res.statusCode = 404;
             res.end(JSON.stringify({
                 error: 'Not found',
-                endpoints: ['/status', '/output', '/output/all', '/diagnostics', '/state'],
+                endpoints: ['/status', '/output', '/output/all', '/diagnostics', '/state', '/git', '/files', '/health'],
             }));
         }
     });
