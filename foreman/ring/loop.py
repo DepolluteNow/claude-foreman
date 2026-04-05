@@ -51,6 +51,7 @@ class DispatchResult:
     model: str
     worktree: str
     message: str
+    windsurf_prompt: str  # Optimized subagent prompt — pass this directly to bridge.send()
 
 
 class SupervisorLoop:
@@ -138,6 +139,48 @@ class SupervisorLoop:
             f"Antigravity: {routing_summary.get('antigravity', 0)}"
         )
 
+    # ── PROMPT FORMATTING ───────────────────────────────────────────
+
+    def _format_windsurf_prompt(self, task: TaskState, worktree: str) -> str:
+        """
+        Format an optimized subagent prompt for Windsurf/Cascade.
+
+        Frames Windsurf as an autonomous coding subagent with:
+        - Clear task spec and acceptance criteria
+        - A deterministic commit message prefix for reliable completion detection
+        - Explicit no-questions boundary (avoids WAITING_INPUT stalls)
+        """
+        total = len(self.state.tasks) if self.state else "?"
+        # First non-empty line of spec as brief description for the commit message
+        brief = next((line.strip() for line in task.spec.splitlines() if line.strip()), "task")[:60]
+        commit_prefix = f"foreman-task-{task.id}"
+
+        retry_note = ""
+        if task.retries > 0:
+            retry_note = (
+                f"\n> NOTE: This is retry {task.retries}. "
+                "A previous attempt did not fully satisfy the acceptance criteria. "
+                "Read the task carefully and ensure all steps are completed.\n"
+            )
+
+        return (
+            f"You are an autonomous coding subagent. Complete the task below without asking "
+            f"for clarification. Work in the worktree at: {worktree}\n"
+            f"{retry_note}\n"
+            f"## Task {task.id}/{total} [{task.complexity}]\n\n"
+            f"{task.spec}\n\n"
+            f"## Completion\n\n"
+            f"When all steps are done, commit every changed file with this exact message:\n\n"
+            f"    git add -A && git commit -m \"{commit_prefix}: {brief}\"\n\n"
+            f"The commit message MUST start with `{commit_prefix}:` — this is how the "
+            f"supervisor knows you finished.\n\n"
+            f"## Rules\n\n"
+            f"- Work autonomously — do not ask questions or wait for confirmation\n"
+            f"- Do not modify files outside the scope of this task\n"
+            f"- Do not push — commit only\n"
+            f"- If you hit a compile error, fix it before committing\n"
+        )
+
     # ── DISPATCH ────────────────────────────────────────────────────
 
     def dispatch_next(self) -> Optional[DispatchResult]:
@@ -168,6 +211,7 @@ class SupervisorLoop:
             model=task.model,
             worktree=worktree,
             message=format_task_start(task, len(self.state.tasks)),
+            windsurf_prompt=self._format_windsurf_prompt(task, worktree),
         )
 
     # ── WAIT ────────────────────────────────────────────────────────
@@ -178,11 +222,14 @@ class SupervisorLoop:
 
         Claude calls this in a loop with sleep between calls.
         Returns WatchResult with .stable = True when model appears done.
+        WatchResult.committed = True means the foreman-task-{id} commit was detected.
         """
+        task = self.state.current_task() if self.state else None
         watcher = FilesystemWatcher(
             worktree=Path(worktree_path).expanduser(),
             poll_interval=self.config.poll_interval,
             stability_polls=self.config.stability_polls,
+            task_id=task.id if task else None,
         )
         return watcher.check_once()
 
@@ -192,11 +239,15 @@ class SupervisorLoop:
 
         Better than poll_completion() for actual waiting — maintains state
         across consecutive checks for stability detection.
+        WatchResult.committed = True is the primary completion signal when
+        the subagent used the expected foreman-task-{id}: commit prefix.
         """
+        task = self.state.current_task() if self.state else None
         return FilesystemWatcher(
             worktree=Path(worktree_path).expanduser(),
             poll_interval=self.config.poll_interval,
             stability_polls=self.config.stability_polls,
+            task_id=task.id if task else None,
         )
 
     def is_timed_out(self) -> bool:
