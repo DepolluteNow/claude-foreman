@@ -4,234 +4,214 @@ version: 1.0.0
 description: |
   Autonomous coding supervisor — Claude thinks and reviews, free models (Kimi, Gemini)
   do the typing. Dispatch task files to AI assistants running in Windsurf, Antigravity,
-  or Cursor via the foreman Python library and CLI.
-  Smart model selection per task. Token accounting after every dispatch.
+  or Cursor. Smart model selection per task. Token accounting after every dispatch.
   Invoke with: /claude-foreman [task-file] [assistant]
   Proactively invoke when the user says "send this to Kimi", "have Windsurf do it",
   "dispatch to Gemini", "use foreman", or writes a .tasks/ file.
 allowed-tools:
   - Bash
   - Read
-  - Write
-  - Edit
-  - Grep
   - Glob
-  - Agent
 ---
 
 # Claude Foreman — Autonomous Coding Supervisor
 
-Claude thinks. Free models type.
+Claude thinks. Free models type. Foreman makes sure it's done right.
 
-Source: `~/CascadeProjects/claude-foreman/`
-Install: `pip install -e ~/CascadeProjects/claude-foreman/` (if not already installed)
+**Goal: minimise Claude tokens per dispatch cycle.**
+Every phase is ONE tool call. Never poll in multiple calls. Never read entire files.
+
+## Plugin
+
+All logic lives in the `claude-foreman` Python package.
+Install path: `~/CascadeProjects/claude-foreman/`
+
+```bash
+# Verify the CLI is available
+cd ~/CascadeProjects/claude-foreman && pip install -e . -q
+foreman --help
+```
 
 ## Arguments
 
-- `$ARGUMENTS[0]` — task file path (e.g., `.tasks/010-extension-v2.md`)
-- `$ARGUMENTS[1]` — assistant target: `windsurf` | `antigravity` | `cursor` (default: `windsurf`)
+- `$ARGUMENTS[0]` — task file path (e.g. `.tasks/010-extension-v2.md`)
+- `$ARGUMENTS[1]` — assistant: `windsurf` | `antigravity` | `cursor` (default: `windsurf`)
 
-If no arguments provided, check for the most recent `.tasks/*.md` file and ask which assistant.
+If no arguments, check for the most recent `.tasks/*.md` and ask which assistant.
 
 ## IDE Configuration
 
-| Assistant | IDE | Port | CLI |
-|-----------|-----|------|-----|
-| Kimi / Claude / GPT | Windsurf | 19854 | `windsurf chat` |
-| Gemini | Antigravity | 19855 | AppleScript only |
-| Cursor AI | Cursor | 19856 | AppleScript only |
-
-## Workflow — 5 Phases, 6 Tool Calls Max
-
-All phases call the `foreman` CLI, which wraps the Python library.
-Never reimplement phase logic inline — use the CLI.
+| Assistant | IDE | Port |
+|-----------|-----|------|
+| Windsurf (Kimi/GPT-4.1) | Windsurf | 19854 |
+| Antigravity (Gemini) | Antigravity | 19855 |
+| Cursor | Cursor | 19856 |
 
 ---
 
-### Phase 0: Pre-Flight (1 tool call — MANDATORY, NEVER SKIP)
+## Workflow — 4 Phases, 4 Tool Calls
+
+### Phase 0: Pre-flight (1 tool call — HARD GATE, never skip)
 
 ```bash
-TASK_FILE="/absolute/path/to/.tasks/NNN-slug.md"
-WORKTREE="/absolute/path/to/repo"
-IDE="windsurf"   # windsurf | antigravity | cursor
+cd ~/CascadeProjects/claude-foreman
 
-# Verify IDE state, record HEAD hash for Phase 2
-PREFLIGHT=$(foreman preflight --ide "$IDE" --worktree "$WORKTREE" 2>/dev/null)
+# Returns JSON with ready, head, local_branch, bridge_branch, issues
+PREFLIGHT=$(foreman preflight \
+  --ide windsurf \
+  --worktree /absolute/path/to/worktree)
 echo "$PREFLIGHT"
+
+# Extract HEAD hash for Phase 2
 PRE_HEAD=$(echo "$PREFLIGHT" | python3 -c "import sys,json; print(json.load(sys.stdin)['head'])")
 echo "Pre-dispatch HEAD: $PRE_HEAD"
 ```
 
-**What this checks:**
-- IDE bridge is reachable and on the correct workspace (guards Failure 4: wrong window)
-- Local branch is what you expect
-- Records the HEAD hash — used in Phase 2 to detect NEW commits only (guards Failure 2: --since false trigger)
-
-**If preflight exits 1:** fix the reported issues before dispatching:
-- Wrong folder → `foreman preflight` will say so; run `open -a Windsurf "$WORKTREE"` and re-check
-- Restricted Mode → click the blue "Yes, I trust the authors" button in Windsurf, then retry
-- Bridge unavailable → install foreman-bridge extension from `~/CascadeProjects/claude-foreman/extension/foreman-bridge/`
-
-**Model selection (optional, include in same tool call):**
-```bash
-python3 -c "
-from foreman.models import recommend_for_task, format_recommendation
-a, m = recommend_for_task('$TASK_FILE', '$IDE')
-print(format_recommendation(a, m))
-"
-```
-
----
+**If `ready: false`:** fix the issues listed before proceeding.
+Common fixes:
+- Wrong folder: reopen IDE on correct path
+- Restricted Mode: click "Yes, I trust the authors" in Windsurf
+- Wrong branch: `git worktree add ~/CascadeProjects/dn-<slug> -b feat/<slug> origin/main`
 
 ### Phase 1: Dispatch (1 tool call)
 
 ```bash
-foreman dispatch-task "$TASK_FILE" \
-    --ide "$IDE" \
-    --worktree "$WORKTREE"
+cd ~/CascadeProjects/claude-foreman
+
+foreman dispatch-task /absolute/path/to/.tasks/NNN-slug.md \
+  --ide windsurf \
+  --worktree /absolute/path/to/worktree
 ```
 
-This single command:
-1. Opens a fresh `--new-window` in the IDE (eliminates stale-tab failures)
-2. Waits 2 seconds for the IDE to settle
-3. Sends `dispatch.windsurf_prompt` via `windsurf chat` (primary) or AppleScript (fallback)
-4. Attaches the task file via `--add-file` so the agent reads every step (eliminates Failure 6: relative path resolution)
+The plugin:
+1. Opens a fresh IDE window (`windsurf --new-window`) — eliminates stale-tab failures
+2. Sends the subagent prompt via `windsurf chat` CLI with `--add-file` — eliminates AppleScript failures
+3. Falls back to AppleScript clipboard injection if CLI unavailable
+4. Marks the task IN_PROGRESS in state
 
-**Do NOT** use raw `osascript` clipboard injection — it is the legacy fallback, subject to 7 documented failure modes. The `foreman dispatch-task` command handles all of this correctly.
-
----
-
-### Phase 2: Wait (1 tool call — ONE loop, never multiple polls)
+### Phase 2: Wait (1 tool call — never multiple polls)
 
 ```bash
+cd ~/CascadeProjects/claude-foreman
+
 foreman wait \
-    --worktree "$WORKTREE" \
-    --pre-head "$PRE_HEAD" \
-    --timeout 600 \
-    --interval 30
+  --worktree /absolute/path/to/worktree \
+  --pre-head "$PRE_HEAD" \
+  --timeout 600 \
+  --interval 30
 ```
 
-Blocks until HEAD moves past `$PRE_HEAD`, exits 0 on success, 1 on timeout.
+The plugin polls `git rev-parse HEAD` every 30s and exits as soon as HEAD
+moves past `$PRE_HEAD`.  This is the most reliable signal — avoids the
+`--since` false-trigger failure mode.
 
-The watcher uses three signals in priority order:
-1. `head_changed` — any new commit (fastest, most reliable)
-2. `committed` — a `foreman-task-{id}:` commit specifically
-3. File stability — fallback for agents that don't commit immediately
+Exit 0 = done. Exit 1 = timeout (check IDE for errors or input wait).
 
-**Do NOT** use `git log --since` — it matches the existing HEAD commit (Failure 2).
-**Do NOT** poll with multiple separate Bash calls — use one `foreman wait` call.
+### Phase 3: Verify (1 tool call)
+
+```bash
+cd ~/CascadeProjects/claude-foreman
+
+foreman verify --worktree /absolute/path/to/worktree
+```
+
+Prints: files changed, diff summary, TypeScript errors, circle detection.
+
+**Claude reviews the output and decides:**
+- ✅ Clean → `foreman` marks complete internally; move to next task
+- ⚠️ Minor issues → re-dispatch (max 2 retries)
+- 🔁 Circle detected → Claude takes over (max 50 lines)
+- 🚨 Major blocker → escalate to human via Telegram
 
 ---
 
-### Phase 3: Verify (1–2 tool calls)
+## Smart Model Selection (before Phase 0)
 
 ```bash
-foreman verify --worktree "$WORKTREE"
+cd ~/CascadeProjects/claude-foreman
+python3 -c "
+from foreman.models import recommend_for_task, format_recommendation
+a, m = recommend_for_task('/absolute/path/to/.tasks/NNN-slug.md', 'windsurf')
+print(format_recommendation(a, m))
+"
 ```
 
-Prints:
-- Files changed
-- `git diff --stat`
-- TypeScript/lint errors (from foreman-bridge diagnostics)
-- Circle detection result (SAME_REGION, SAME_ERROR, NET_ZERO)
-- Full diff (truncated to 500 lines)
-
-Claude reads this output and decides:
-- ✅ **Clean** → `foreman mark-clean` (or just proceed to next task)
-- ⚠️ **Minor fix** → re-dispatch with retry note (handled automatically via `foreman dispatch-task` retry)
-- 🔁 **Circle detected** → Claude takeover (max 50 lines, then `foreman mark-takeover N`)
-- 🚨 **Blocker** → `foreman mark-escalated "reason"` + Telegram notification
-
-**If extension code changed** (second tool call only):
-```bash
-cd ~/CascadeProjects/claude-foreman/extension/foreman-bridge && \
-npm run compile 2>&1 && \
-npx @vscode/vsce package 2>&1 && \
-/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf \
-    --install-extension foreman-bridge-*.vsix --force 2>&1 && \
-osascript -e '
-tell application "System Events"
-    tell (first process whose bundle identifier is "com.exafunction.windsurf")
-        set frontmost to true; delay 0.3
-        keystroke "p" using {command down, shift down}; delay 0.5
-        set the clipboard to ">Developer: Reload Window"
-        keystroke "v" using command down; delay 0.3
-        key code 36
-    end tell
-end tell'
-```
+Use the recommended model — it minimises retries and saves Claude tokens.
 
 ---
 
-### Phase 4: Test Bridge (1 tool call — only when extension changed)
+## Token Budget
 
-```bash
-PORT=19854
-sleep 5
-curl -s "http://127.0.0.1:${PORT}/status" && \
-curl -s "http://127.0.0.1:${PORT}/health" && \
-curl -s "http://127.0.0.1:${PORT}/git"
-```
+| Phase | Command | Max tool calls | Est. tokens |
+|-------|---------|---------------|-------------|
+| Model selection | `python3 -c "from foreman.models..."` | 1 | ~200 |
+| Pre-flight | `foreman preflight` | 1 | ~300 |
+| Dispatch | `foreman dispatch-task` | 1 | ~300 |
+| Wait | `foreman wait` | 1 | ~400 |
+| Verify | `foreman verify` | 1 | ~500 |
+| **Total** | | **5** | **~1,700** |
 
 ---
 
-### Phase 5: Token Accounting (MANDATORY after every dispatch)
+## Token Accounting (run after every dispatch)
+
+After `foreman verify`, produce this table:
 
 ```
 ## Foreman Dispatch Report — Task NNN
 
 | Phase | Tool Calls | Est. Tokens |
 |-------|-----------|-------------|
-| Pre-flight + model select | 1 | ~400 |
+| Model selection | 1 | ~200 |
+| Pre-flight | 1 | ~300 |
 | Dispatch | 1 | ~300 |
 | Wait | 1 | ~400 |
-| Verify | 1–2 | ~600 |
-| **Foreman Total** | **4–5** | **~1,700** |
+| Verify | 1 | ~500 |
+| **Foreman Total** | **5** | **~1,700** |
 
-### Savings Estimate
+### Savings vs. Claude doing it directly
+
 | Metric | Value |
 |--------|-------|
 | Lines generated by free model | N |
-| Files created/modified | N |
 | If Claude wrote this directly | ~X tokens |
 | Foreman overhead | ~1,700 tokens |
 | **Tokens saved** | **~X (Y%)** |
-| **Cost equivalent saved** | **~$X.XX** |
+| **Cost avoided** | **~$X.XX** |
 ```
 
-Pricing: Claude Sonnet output = $15/M tokens ($0.015/K). Free models = $0.
+Pricing reference: Claude Sonnet output = $15/M tokens ($0.015 per 1K).
+Delegated work to Kimi/Gemini = $0 (free tier).
 
 ---
 
-## Token Budget
+## Anti-Patterns
 
-| Phase | Target | Max Tool Calls |
-|-------|--------|---------------|
-| Pre-flight + model select | ~400 | 1 |
-| Dispatch | ~300 | 1 |
-| Wait | ~400 | 1 |
-| Verify | ~600 | 2 |
-| **Total** | **~1,700** | **5** |
+1. ❌ Skip Phase 0 — dispatching without verifying branch/folder caused the worst failures
+2. ❌ Multiple poll calls — `foreman wait` is ONE blocking call
+3. ❌ `git log --since` — matches existing HEAD; always compare against saved hash
+4. ❌ Relative paths in task files — always use absolute paths
+5. ❌ Dispatch when IDE has multiple windows open — `foreman dispatch-task` handles this via `--new-window`
+6. ❌ Read full files to verify — `foreman verify` shows only what matters
+7. ❌ Quit IDE without checking if agent is still running — check bridge `/files` first
 
----
+## Failure Reference
 
-## Anti-Patterns (NEVER)
-
-1. ❌ Skip Phase 0 — dispatching blind caused the worst failures
-2. ❌ Use `git log --since` — matches existing HEAD (Failure 2)
-3. ❌ Multiple separate poll calls — use one `foreman wait` call
-4. ❌ Raw AppleScript clipboard injection instead of `foreman dispatch-task`
-5. ❌ Relative paths in dispatch prompts — `foreman dispatch-task` uses `--add-file` with absolute paths
-6. ❌ Dispatch when multiple IDE windows are open without verifying the right one
-7. ❌ Quit IDE without checking if agent is still running (check bridge `/files` first)
-8. ❌ Assume bridge is on correct project when multiple windows exist
-9. ❌ Reimplement phase logic inline with bash — always use the `foreman` CLI
-
----
+| # | What happened | Fix |
+|---|---------------|-----|
+| 1 | Wrong branch dispatch | Phase 0 pre-flight is mandatory |
+| 2 | Wait loop false trigger | `--pre-head` comparison, not `--since` |
+| 3 | Model switch wrong command | Use `foreman` CLI, not AppleScript guesses |
+| 4 | Multi-window dispatch went to wrong project | `--new-window` in dispatch-task |
+| 5 | Keystrokes hit editor, not Cascade | `windsurf chat` CLI avoids this entirely |
+| 6 | Relative path resolved against wrong workspace | Absolute paths + `--add-file` |
+| 7 | Cascade input not focused | `windsurf chat` avoids this entirely |
+| 8 | `windsurf chat` opened wrong workspace | Always pass absolute worktree path |
+| 9 | Quit Windsurf while Cascade was running | Check bridge `/files` before quitting |
 
 ## Task File Format
 
-Lives in `.tasks/NNN-slug.md`:
+Task files live in `.tasks/NNN-slug.md`:
 
 ```markdown
 # Task N: Title
@@ -257,56 +237,17 @@ commands to verify
 ## Commit
 
 \`\`\`bash
-git add -A && git commit -m "foreman-task-N: description"
+git add -A && git commit -m "type: description"
 \`\`\`
 ```
 
-The commit message MUST start with `foreman-task-{id}:` — this is the signal
-`foreman wait` uses to confirm the right task finished.
-
----
-
-## Parallel Dispatch (multiple assistants)
+## Bridge HTTP Endpoints (for manual inspection)
 
 ```bash
-# Dispatch to Windsurf and Antigravity simultaneously
-foreman dispatch-task .tasks/011-frontend.md --ide windsurf --worktree ~/CascadeProjects/dn-windsurf &
-foreman dispatch-task .tasks/012-backend.md --ide antigravity --worktree ~/CascadeProjects/dn-antigravity &
-wait
-
-# Monitor both (in a single Bash call)
-foreman wait --worktree ~/CascadeProjects/dn-windsurf --pre-head "$HEAD_WS" &
-foreman wait --worktree ~/CascadeProjects/dn-antigravity --pre-head "$HEAD_AG" &
-wait
+PORT=19854  # 19854=windsurf, 19855=antigravity, 19856=cursor
+curl -s http://127.0.0.1:$PORT/status    # version check
+curl -s http://127.0.0.1:$PORT/git       # branch, log
+curl -s http://127.0.0.1:$PORT/health    # alive, last save age
+curl -s http://127.0.0.1:$PORT/files     # recent saves
+curl -s http://127.0.0.1:$PORT/diagnostics  # TypeScript errors
 ```
-
----
-
-## Bridge Endpoints Reference
-
-All served by the `foreman-bridge` VS Code extension (port per IDE).
-
-| Endpoint | Returns | Use For |
-|----------|---------|---------|
-| `/status` | version, IDE, port | Version check |
-| `/health` | alive, sinceLastSaveMs, errorCount | Quick poll |
-| `/git` | branch, status, diff, log | Verify correct workspace |
-| `/files` | saves (last 20), events | Detect if agent still active |
-| `/output` | terminal lines (last 50) | Build output |
-| `/diagnostics` | errors, warnings | Compile errors |
-
----
-
-## Lessons Learned (hard-won)
-
-| # | Failure | Root Cause | Fix in foreman CLI |
-|---|---------|------------|-------------------|
-| 1 | Dispatched to wrong branch | No pre-dispatch verification | `foreman preflight` is mandatory Phase 0 |
-| 2 | Wait loop false-triggered | `git log --since` matched existing HEAD | `foreman wait --pre-head HASH` compares exact hash |
-| 3 | AppleScript used wrong command | Guessed command name | Fixed: correct command is `>Switch AI Provider` |
-| 4 | Keystroke went to wrong window | Multiple Windsurf windows open | `foreman dispatch-task --new-window` opens clean window |
-| 5 | Keystrokes hit editor not Cascade | Cascade panel not focused | `windsurf chat` CLI bypasses focus entirely |
-| 6 | Cascade resolved wrong relative path | Prompt used relative path | `--add-file` with absolute path via `foreman dispatch-task` |
-| 7 | Cascade input not focused | Electron web DOM invisible to AppleScript | `windsurf chat` CLI is the primary dispatch method |
-| 8 | `windsurf chat` opened wrong workspace | Wrong path argument | `foreman dispatch-task` copies task to worktree and uses absolute paths |
-| 9 | Quit IDE during active Cascade session | No active-session check | Check bridge `/files` (sinceLastSaveMs < 60s = still active) before quitting |
