@@ -157,6 +157,101 @@ def dispatch_task(task_file: str, ide: str, worktree: str, new_window: bool, sta
         sys.exit(1)
 
 
+# ── Issue dispatch ───────────────────────────────────────────────────────────
+
+@cli.command("dispatch-issue")
+@click.argument("issue_ref")
+@_ide_opt
+@_worktree_opt
+@click.option("--branch", default=None,
+              help="Branch name (default: feat/issue-{N}-{slug}).")
+@click.option("--new-window/--no-new-window", default=True,
+              help="Open a fresh IDE window before dispatching.")
+def dispatch_issue(issue_ref: str, ide: str, worktree: str, branch: str, new_window: bool):
+    """Dispatch a GitHub issue to the IDE agent.
+
+    ISSUE_REF format: owner/repo#123  (or a full GitHub issue URL)
+
+    Fetches the issue via `gh` CLI, creates/checks out the branch, runs a
+    pre-flight check, then dispatches the agent prompt via the bridge.
+
+    Prints the pre-dispatch HEAD hash on stdout so the caller can pipe it
+    to `foreman wait --pre-head`.
+
+    \b
+    Example:
+        HEAD=$(foreman dispatch-issue depollutenow/depollute-shop#42 \\
+                   --ide windsurf \\
+                   --worktree ~/CascadeProjects/dn-windsurf)
+        foreman wait --worktree ~/CascadeProjects/dn-windsurf --pre-head "$HEAD"
+    """
+    from foreman.github import parse_issue_ref, fetch_issue, ensure_branch, format_issue_prompt
+    from foreman.drivers.ide_driver import IDEDriver
+
+    # ── Fetch issue ─────────────────────────────────────────────────
+    try:
+        repo, number = parse_issue_ref(issue_ref)
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Fetching {repo}#{number}...", err=True)
+    try:
+        issue = fetch_issue(repo, number)
+    except RuntimeError as e:
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"#{issue.number}: {issue.title}", err=True)
+
+    # ── Branch setup ────────────────────────────────────────────────
+    try:
+        used_branch = ensure_branch(worktree, issue, custom_branch=branch or "")
+    except RuntimeError as e:
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Branch: {used_branch}", err=True)
+
+    # ── Pre-flight ──────────────────────────────────────────────────
+    loop = SupervisorLoop.from_defaults()
+    preflight = loop.pre_flight_check(worktree, ide=ide, expected_branch=used_branch)
+    if not preflight.ready:
+        for msg in preflight.issues:
+            click.echo(f"❌ {msg}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        f"✅ Pre-flight passed — HEAD {preflight.head[:7]} on {preflight.local_branch}",
+        err=True,
+    )
+
+    # ── Open workspace ──────────────────────────────────────────────
+    config = SupervisorConfig.default()
+    driver = IDEDriver(config)
+    if new_window:
+        try:
+            driver.open_workspace(ide, worktree)
+            time.sleep(2)
+        except Exception as e:
+            click.echo(f"⚠️  Could not open workspace: {e} — continuing anyway", err=True)
+
+    # ── Dispatch ────────────────────────────────────────────────────
+    prompt = format_issue_prompt(issue, worktree, used_branch)
+    try:
+        driver.send(ide, prompt, worktree=worktree)
+        click.echo(
+            f"✅ Dispatched #{issue.number} → {ide} | branch: {used_branch}",
+            err=True,
+        )
+    except Exception as e:
+        click.echo(f"❌ Dispatch failed: {e}", err=True)
+        sys.exit(1)
+
+    # Print HEAD on stdout so caller can pipe it to `foreman wait --pre-head`
+    click.echo(preflight.head)
+
+
 # ── Phase 2: Wait ────────────────────────────────────────────────────────────
 
 @cli.command("wait")
