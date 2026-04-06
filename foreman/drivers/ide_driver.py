@@ -1,6 +1,7 @@
 import importlib
+from typing import Optional
 
-from foreman.bridge_interface import AIBridge, AIBridgeError, AIStatus
+from foreman.bridge_interface import AIBridge, AIBridgeError, AIStatus, PreFlightResult
 from foreman.config import SupervisorConfig
 
 # Maps bridge_type → (module_path, class_name)
@@ -59,16 +60,31 @@ class IDEDriver:
             if not ide_config:
                 raise AIBridgeError(f"Unknown IDE: {ide_name}")
             bridge_cls = _load_bridge_class(ide_config.bridge_type)
-            # Pass ide_name so bridge knows which port to use
             try:
                 self._bridges[ide_name] = bridge_cls(ide_name=ide_name)
             except TypeError:
-                # Fallback for bridges that don't accept ide_name
                 self._bridges[ide_name] = bridge_cls()
         return self._bridges[ide_name]
 
-    def send(self, ide: str, prompt: str) -> None:
-        self.get_bridge(ide).send(prompt)
+    def send(
+        self,
+        ide: str,
+        prompt: str,
+        worktree: Optional[str] = None,
+        task_file: Optional[str] = None,
+    ) -> None:
+        self.get_bridge(ide).send(prompt, worktree=worktree, task_file=task_file)
+
+    def pre_flight_check(
+        self,
+        ide: str,
+        worktree: str,
+        expected_branch: Optional[str] = None,
+    ) -> PreFlightResult:
+        return self.get_bridge(ide).pre_flight_check(worktree, expected_branch)
+
+    def open_workspace(self, ide: str, worktree: str) -> None:
+        self.get_bridge(ide).open_workspace(worktree)
 
     def status(self, ide: str) -> AIStatus:
         return self.get_bridge(ide).status()

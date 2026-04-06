@@ -5,7 +5,7 @@ import urllib.error
 from pathlib import Path
 from typing import Optional
 
-from foreman.bridge_interface import AIBridge, AIBridgeError, AIStatus
+from foreman.bridge_interface import AIBridge, AIBridgeError, AIStatus, PreFlightResult
 from foreman.drivers.cascade_bridge import BRIDGE_PORTS
 
 APPLESCRIPT_DIR = Path(__file__).parent / "applescript"
@@ -53,7 +53,12 @@ class CursorBridge(AIBridge):
         if "cursor" not in detected and not self._http_available:
             raise AIBridgeError(f"Cursor not running (detected: {detected})")
 
-    def send(self, prompt: str, mode: str = "continue") -> None:
+    def send(
+        self,
+        prompt: str,
+        worktree: Optional[str] = None,
+        task_file: Optional[str] = None,
+    ) -> None:
         result = subprocess.run(
             ["osascript", str(APPLESCRIPT_DIR / "cursor_composer.scpt"),
              "send", prompt],
@@ -61,6 +66,43 @@ class CursorBridge(AIBridge):
         )
         if result.returncode != 0:
             raise AIBridgeError(f"Send failed: {result.stderr}")
+
+    def open_workspace(self, worktree: str) -> None:
+        subprocess.run(["open", "-a", "Cursor", worktree], capture_output=True)
+
+    def pre_flight_check(
+        self,
+        worktree: str,
+        expected_branch: Optional[str] = None,
+    ) -> PreFlightResult:
+        issues: list[str] = []
+        git_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=worktree, capture_output=True, text=True,
+        )
+        local_branch = git_branch.stdout.strip() if git_branch.returncode == 0 else "?"
+        head_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree, capture_output=True, text=True,
+        )
+        head = head_result.stdout.strip() if head_result.returncode == 0 else ""
+        bridge_branch = "(bridge unavailable)"
+        if self._http_available:
+            try:
+                bridge_branch = self._http_get("/git").get("branch", "?")
+                if bridge_branch == "(no workspace)":
+                    issues.append("Bridge reports no workspace — Cursor may be in Restricted Mode.")
+            except AIBridgeError as e:
+                issues.append(f"Bridge HTTP error: {e}")
+        if expected_branch and local_branch != expected_branch:
+            issues.append(f"Local branch '{local_branch}' ≠ expected '{expected_branch}'")
+        return PreFlightResult(
+            ready=len(issues) == 0,
+            head=head,
+            local_branch=local_branch,
+            bridge_branch=bridge_branch,
+            issues=issues,
+        )
 
     def status(self) -> AIStatus:
         if self._http_available:

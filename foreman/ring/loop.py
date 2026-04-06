@@ -1,15 +1,21 @@
 """
 Foreman Loop — The orchestrator.
 
-This module provides the mechanical state machine that Claude drives via the SKILL.md protocol.
-Claude handles the intelligent parts (decompose, review, takeover); this module handles the
-state transitions, timing, dispatching, and persistence.
+This module provides the mechanical state machine that Claude drives via the
+/claude-foreman skill.  Claude handles the intelligent parts (decompose,
+review, takeover); this module handles state transitions, timing, dispatching,
+and persistence.
 
-Usage (from Claude Code skill):
-    from foreman.ring.loop import ForemanLoop
-    loop = ForemanLoop.from_defaults()
+Usage (via `foreman` CLI — the skill calls these commands):
+    foreman preflight  --ide windsurf --worktree /path/to/repo
+    foreman dispatch-task --task .tasks/010-slug.md --ide windsurf --worktree /path
+    foreman wait       --worktree /path --pre-head <HASH>
+    foreman verify     --worktree /path
+
+Usage (direct Python — for advanced orchestration):
+    from foreman.ring.loop import SupervisorLoop
+    loop = SupervisorLoop.from_defaults()
     loop.initialize("implement user auth", task_specs)
-    # ... Claude drives the loop via methods below
 """
 
 import json
@@ -20,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from foreman.bridge_interface import PreFlightResult
 from foreman.comms.telegram import (format_completion, format_escalation,
                                     format_takeover, format_task_done,
                                     format_task_start)
@@ -45,20 +52,28 @@ class ReviewContext:
 
 @dataclass
 class DispatchResult:
-    """Result of dispatching a task to an IDE."""
+    """Result of dispatching a task to an IDE.
+
+    Pass ``windsurf_prompt`` directly to ``bridge.send()``.
+    The ``task_file`` field, when set, should be supplied as
+    ``task_file=`` to ``bridge.send()`` so the IDE CLI can attach it
+    via ``--add-file`` (avoids Failure 6: relative path resolution).
+    """
     task: TaskState
     ide: str
     model: str
     worktree: str
-    message: str
-    windsurf_prompt: str  # Optimized subagent prompt — pass this directly to bridge.send()
+    message: str           # Telegram notification
+    windsurf_prompt: str   # Optimised subagent prompt — pass to bridge.send()
+    task_file: Optional[str] = None  # Absolute path to .tasks/*.md, for --add-file
 
 
 class SupervisorLoop:
     """
     Mechanical state machine for the autonomous foreman.
 
-    Claude drives this via SKILL.md. The loop handles:
+    Claude drives this via the /claude-foreman skill (which calls the
+    ``foreman`` CLI).  The loop handles:
     - State persistence (crash recovery)
     - Task routing (heuristic + adaptive)
     - Filesystem watching (completion detection)
@@ -113,13 +128,12 @@ class SupervisorLoop:
         Returns:
             Summary string with task count and routing breakdown
         """
-        # Load learnings for adaptive routing
         learnings_data = self.learnings.load()
         model_perf = learnings_data.get("model_performance") or None
 
         self.state = SupervisorState.new(goal)
 
-        routing_summary = {"windsurf": 0, "antigravity": 0}
+        routing_summary: dict[str, int] = {}
         for spec in task_specs:
             classification = self.router.classify(spec, model_performance=model_perf)
             self.state.add_task(
@@ -133,62 +147,98 @@ class SupervisorLoop:
         self.state.save(self.state_path)
         self._session_start_time = time.time()
 
-        return (
-            f"Initialized {len(task_specs)} tasks. "
-            f"Windsurf: {routing_summary.get('windsurf', 0)}, "
-            f"Antigravity: {routing_summary.get('antigravity', 0)}"
+        parts = [f"Initialized {len(task_specs)} tasks."]
+        for ide, count in routing_summary.items():
+            parts.append(f"{ide.capitalize()}: {count}")
+        return " ".join(parts)
+
+    # ── PRE-FLIGHT ───────────────────────────────────────────────────
+
+    def pre_flight_check(
+        self,
+        worktree_path: str,
+        ide: Optional[str] = None,
+        expected_branch: Optional[str] = None,
+    ) -> PreFlightResult:
+        """Phase 0: verify IDE state before dispatch.
+
+        Loads the IDE bridge and runs a pre-flight check against the worktree.
+        Returns a PreFlightResult — callers must check ``.ready`` and fix any
+        ``.issues`` before proceeding.
+
+        The ``.head`` field of the result should be passed to
+        ``create_watcher()`` as ``pre_dispatch_head`` for reliable completion
+        detection (avoids the --since false-trigger failure mode).
+        """
+        from foreman.drivers.ide_driver import IDEDriver
+        driver = IDEDriver(self.config)
+        ide_name = ide or (self.state.current_task().ide if self.state and self.state.current_task() else "windsurf")
+        return driver.pre_flight_check(ide_name, worktree_path, expected_branch)
+
+    def record_pre_dispatch_head(self, worktree_path: str) -> str:
+        """Return the current HEAD hash of the worktree.
+
+        Call this immediately before dispatch and pass the result to
+        ``create_watcher()`` as ``pre_dispatch_head``.  This is the most
+        reliable completion signal — the watcher fires as soon as any new
+        commit appears (avoids the --since false-trigger failure mode).
+        """
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(worktree_path).expanduser(),
+            capture_output=True,
+            text=True,
         )
+        return result.stdout.strip()
 
     # ── PROMPT FORMATTING ───────────────────────────────────────────
 
     def _format_windsurf_prompt(self, task: TaskState, worktree: str) -> str:
-        """
-        Format an optimized subagent prompt for Windsurf/Cascade.
+        """Format the subagent prompt sent to Windsurf/Cascade via bridge.send().
 
-        Frames Windsurf as an autonomous coding subagent with:
-        - Clear task spec and acceptance criteria
-        - A deterministic commit message prefix for reliable completion detection
-        - Explicit no-questions boundary (avoids WAITING_INPUT stalls)
+        Kept short because the full task spec is attached via ``--add-file``.
+        The prompt just tells the agent what file to read and what commit to
+        make when done.
         """
         total = len(self.state.tasks) if self.state else "?"
-        # First non-empty line of spec as brief description for the commit message
-        brief = next((line.strip() for line in task.spec.splitlines() if line.strip()), "task")[:60]
         commit_prefix = f"foreman-task-{task.id}"
 
         retry_note = ""
         if task.retries > 0:
             retry_note = (
-                f"\n> NOTE: This is retry {task.retries}. "
-                "A previous attempt did not fully satisfy the acceptance criteria. "
-                "Read the task carefully and ensure all steps are completed.\n"
+                f" This is retry {task.retries} — a previous attempt did not "
+                "fully satisfy the acceptance criteria. Read every step carefully."
             )
 
         return (
-            f"You are an autonomous coding subagent. Complete the task below without asking "
-            f"for clarification. Work in the worktree at: {worktree}\n"
-            f"{retry_note}\n"
-            f"## Task {task.id}/{total} [{task.complexity}]\n\n"
-            f"{task.spec}\n\n"
-            f"## Completion\n\n"
-            f"When all steps are done, commit every changed file with this exact message:\n\n"
-            f"    git add -A && git commit -m \"{commit_prefix}: {brief}\"\n\n"
-            f"The commit message MUST start with `{commit_prefix}:` — this is how the "
-            f"supervisor knows you finished.\n\n"
-            f"## Rules\n\n"
-            f"- Work autonomously — do not ask questions or wait for confirmation\n"
-            f"- Do not modify files outside the scope of this task\n"
-            f"- Do not push — commit only\n"
-            f"- If you hit a compile error, fix it before committing\n"
+            f"You are an autonomous coding subagent executing Task {task.id}/{total} "
+            f"[{task.complexity}].{retry_note} "
+            f"The task file is attached — read it and execute every instruction exactly. "
+            f"Working directory: {worktree}. "
+            f"When done, commit all changes: "
+            f'git add -A && git commit -m "{commit_prefix}: <one-line summary>". '
+            f"The commit message MUST start with `{commit_prefix}:`. "
+            f"Do not push. Do not ask questions. Fix any compile errors before committing."
         )
 
     # ── DISPATCH ────────────────────────────────────────────────────
 
-    def dispatch_next(self) -> Optional[DispatchResult]:
+    def dispatch_next(
+        self,
+        task_file: Optional[str] = None,
+    ) -> Optional[DispatchResult]:
         """
         Get the next pending task, mark it in-progress, and return dispatch info.
 
+        Args:
+            task_file: Absolute path to the .tasks/*.md file for this task.
+                       Passed through to DispatchResult so the caller can
+                       supply it as ``task_file=`` to ``bridge.send()``.
+
         Returns:
-            DispatchResult with task info and worktree path, or None if all done.
+            DispatchResult with task info, worktree, and the optimised
+            ``windsurf_prompt`` to pass directly to ``bridge.send()``.
+            Returns None if all tasks are done.
         """
         if not self.state:
             return None
@@ -212,17 +262,23 @@ class SupervisorLoop:
             worktree=worktree,
             message=format_task_start(task, len(self.state.tasks)),
             windsurf_prompt=self._format_windsurf_prompt(task, worktree),
+            task_file=task_file,
         )
 
     # ── WAIT ────────────────────────────────────────────────────────
 
-    def poll_completion(self, worktree_path: str) -> WatchResult:
-        """
-        Single poll of the filesystem watcher.
+    def poll_completion(
+        self,
+        worktree_path: str,
+        pre_dispatch_head: Optional[str] = None,
+    ) -> WatchResult:
+        """Single poll of the filesystem watcher.
 
         Claude calls this in a loop with sleep between calls.
-        Returns WatchResult with .stable = True when model appears done.
-        WatchResult.committed = True means the foreman-task-{id} commit was detected.
+        Returns WatchResult with ``.stable = True`` when the agent is done.
+
+        Preferred: pass ``pre_dispatch_head`` (from ``record_pre_dispatch_head``
+        or ``pre_flight_check().head``) for HEAD-based completion detection.
         """
         task = self.state.current_task() if self.state else None
         watcher = FilesystemWatcher(
@@ -230,17 +286,22 @@ class SupervisorLoop:
             poll_interval=self.config.poll_interval,
             stability_polls=self.config.stability_polls,
             task_id=task.id if task else None,
+            pre_dispatch_head=pre_dispatch_head,
         )
         return watcher.check_once()
 
-    def create_watcher(self, worktree_path: str) -> FilesystemWatcher:
-        """
-        Create a persistent watcher for repeated polling.
+    def create_watcher(
+        self,
+        worktree_path: str,
+        pre_dispatch_head: Optional[str] = None,
+    ) -> FilesystemWatcher:
+        """Create a persistent watcher for repeated polling.
 
-        Better than poll_completion() for actual waiting — maintains state
-        across consecutive checks for stability detection.
-        WatchResult.committed = True is the primary completion signal when
-        the subagent used the expected foreman-task-{id}: commit prefix.
+        Better than ``poll_completion()`` for actual waiting — maintains
+        stability state across consecutive checks.
+
+        Pass ``pre_dispatch_head`` (from Phase 0) for HEAD-based detection,
+        which is faster and more reliable than stability polling alone.
         """
         task = self.state.current_task() if self.state else None
         return FilesystemWatcher(
@@ -248,6 +309,7 @@ class SupervisorLoop:
             poll_interval=self.config.poll_interval,
             stability_polls=self.config.stability_polls,
             task_id=task.id if task else None,
+            pre_dispatch_head=pre_dispatch_head,
         )
 
     def is_timed_out(self) -> bool:
@@ -264,7 +326,7 @@ class SupervisorLoop:
         Gather everything Claude needs to review the current task's output.
 
         Reads git diff, checks for TypeScript/lint errors, runs circle detection.
-        Returns ReviewContext for Claude to analyze.
+        Returns ReviewContext for Claude to analyse.
         """
         if not self.state:
             return None
@@ -275,14 +337,13 @@ class SupervisorLoop:
 
         worktree = Path(worktree_path).expanduser()
 
-        # Get changed files
+        # Changed files (tracked + untracked)
         files_result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
             cwd=worktree, capture_output=True, text=True,
         )
         files = [f.strip() for f in files_result.stdout.strip().split("\n") if f.strip()]
 
-        # Add untracked files
         untracked_result = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
             cwd=worktree, capture_output=True, text=True,
@@ -290,14 +351,13 @@ class SupervisorLoop:
         untracked = [f.strip() for f in untracked_result.stdout.strip().split("\n") if f.strip()]
         all_files = sorted(set(files + untracked))
 
-        # Get diff summary
+        # Diff summary (--stat) and full diff (truncated to 500 lines)
         stat_result = subprocess.run(
             ["git", "diff", "--stat", "HEAD"],
             cwd=worktree, capture_output=True, text=True,
         )
         diff_summary = stat_result.stdout.strip()
 
-        # Get full diff (truncated to 500 lines for context)
         diff_result = subprocess.run(
             ["git", "diff", "HEAD"],
             cwd=worktree, capture_output=True, text=True,
@@ -307,8 +367,8 @@ class SupervisorLoop:
         if len(diff_lines) > 500:
             full_diff = "\n".join(diff_lines[:500]) + f"\n... ({len(diff_lines) - 500} more lines)"
 
-        # Check for TypeScript errors (if .ts/.tsx files changed)
-        errors = []
+        # TypeScript errors
+        errors: list[str] = []
         ts_files = [f for f in all_files if f.endswith((".ts", ".tsx"))]
         if ts_files:
             tsc_result = subprocess.run(
@@ -316,7 +376,6 @@ class SupervisorLoop:
                 cwd=worktree, capture_output=True, text=True, timeout=60,
             )
             if tsc_result.returncode != 0:
-                # Extract error lines
                 for line in tsc_result.stdout.split("\n"):
                     if any(f in line for f in all_files) and "error" in line.lower():
                         errors.append(line.strip())
@@ -346,29 +405,23 @@ class SupervisorLoop:
         task = self.state.current_task()
         if not task:
             return "No active task"
-
         task.status = TaskStatus.COMPLETED
         task.result = "clean"
         self.state.save(self.state_path)
-
         duration = int(time.time() - self._task_start_time) if self._task_start_time else 0
         return format_task_done(task, len(self.state.tasks), duration)
 
     def mark_minor_fix(self) -> str:
-        """Mark current task as completed with minor corrections needed. Returns retry prompt."""
+        """Mark current task as needing correction. Returns retry prompt."""
         task = self.state.current_task()
         if not task:
             return "No active task"
-
         task.retries += 1
         task.result = "minor_fix"
-
         if task.retries > self.config.max_retries:
-            # Too many retries — escalate
             task.status = TaskStatus.FAILED
             self.state.save(self.state_path)
             return f"Task {task.id} exceeded max retries ({self.config.max_retries}). Escalating."
-
         self.state.save(self.state_path)
         return f"Task {task.id} needs correction (retry {task.retries}/{self.config.max_retries})"
 
@@ -377,11 +430,9 @@ class SupervisorLoop:
         task = self.state.current_task()
         if not task:
             return "No active task"
-
         task.status = TaskStatus.COMPLETED
         task.result = "takeover"
         self.state.save(self.state_path)
-
         return format_takeover(task, len(self.state.tasks), lines_changed)
 
     def mark_escalated(self, reason: str) -> str:
@@ -389,13 +440,11 @@ class SupervisorLoop:
         task = self.state.current_task()
         if not task:
             return "No active task"
-
         task.result = "escalated"
         self.state.paused = True
         self.state.pause_reason = reason
         self.state.save(self.state_path)
 
-        # Get diff summary for the message
         ide_config = self.config.ides.get(task.ide)
         diff_summary = ""
         if ide_config:
@@ -405,7 +454,6 @@ class SupervisorLoop:
                 capture_output=True, text=True,
             )
             diff_summary = result.stdout.strip()
-
         return format_escalation(task, len(self.state.tasks), reason, diff_summary)
 
     def mark_skipped(self) -> str:
@@ -413,7 +461,6 @@ class SupervisorLoop:
         task = self.state.current_task()
         if not task:
             return "No active task"
-
         task.status = TaskStatus.SKIPPED
         task.result = "skipped"
         self.state.save(self.state_path)
@@ -422,32 +469,19 @@ class SupervisorLoop:
     # ── COMPLETION ──────────────────────────────────────────────────
 
     def is_complete(self) -> bool:
-        """Check if all tasks are done (completed, skipped, or failed)."""
+        """Check if all tasks are done."""
         if not self.state:
             return True
         return self.state.current_task() is None
 
     def complete(self) -> str:
-        """
-        Run retrospective and return completion message.
-
-        Called when all tasks are done. Updates learnings file,
-        returns summary for Telegram.
-        """
+        """Run retrospective and return completion message."""
         if not self.state:
             return "No active session"
-
-        # Run retrospective
         self.learnings.record_retrospective(self.state)
-
-        # Calculate duration
         duration_min = int((time.time() - self._session_start_time) / 60)
-
         msg = format_completion(self.state, duration_min)
-
-        # Clear state file (session done)
         self.state_path.unlink(missing_ok=True)
-
         return msg
 
     # ── STATUS ──────────────────────────────────────────────────────
@@ -456,11 +490,9 @@ class SupervisorLoop:
         """Return current status for display."""
         if not self.state:
             return {"active": False}
-
         summary = self.state.progress_summary()
         current = self.state.current_task()
         elapsed = int((time.time() - self._session_start_time) / 60)
-
         return {
             "active": True,
             "goal": self.state.goal,
@@ -479,64 +511,47 @@ class SupervisorLoop:
         }
 
     def get_learnings_context(self) -> str:
-        """
-        Return learnings for the DECOMPOSE phase prompt.
-
-        Claude reads this to apply "always" patterns and avoid "never" patterns
-        when writing task specs.
-        """
+        """Return learnings summary for the DECOMPOSE phase prompt."""
         data = self.learnings.load()
         parts = []
-
         always = data.get("patterns", {}).get("always", [])
         if always:
             parts.append("ALWAYS include in task specs:")
             for p in always:
                 parts.append(f"  - {p}")
-
         never = data.get("patterns", {}).get("never", [])
         if never:
             parts.append("NEVER do in task specs:")
             for p in never:
                 parts.append(f"  - {p}")
-
         perf = data.get("model_performance", {})
         if perf:
             parts.append("Model performance (first-try rate):")
             for model, scores in perf.items():
                 score_str = ", ".join(f"{k}: {v:.0%}" for k, v in scores.items())
                 parts.append(f"  {model}: {score_str}")
-
         history = data.get("first_try_rate_history", [])
         if history:
             parts.append(f"Historical first-try rate: {' → '.join(f'{r:.0%}' for r in history[-5:])}")
-
         return "\n".join(parts) if parts else "No learnings yet (first run)."
 
     # ── RESUME ──────────────────────────────────────────────────────
 
     def resume(self) -> Optional[str]:
-        """
-        Resume from a saved state file.
-
-        Returns status message or None if no saved state.
-        """
+        """Resume from a saved state file."""
         self.state = SupervisorState.load(self.state_path)
         if not self.state:
             return None
-
         self.state.paused = False
         self.state.pause_reason = None
         self.state.save(self.state_path)
         self._session_start_time = time.time()
-
         current = self.state.current_task()
         summary = self.state.progress_summary()
-
         if current:
             return (
                 f"Resumed: {self.state.goal}\n"
                 f"Progress: {summary['completed']}/{summary['total']} tasks\n"
                 f"Next: Task {current.id} — {current.spec[:60]} ({current.ide}/{current.model})"
             )
-        return f"Resumed but all tasks done. Run complete()."
+        return "Resumed but all tasks done. Run complete()."
