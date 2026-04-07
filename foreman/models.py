@@ -5,7 +5,6 @@ available in each IDE based on task type, complexity, and language.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass

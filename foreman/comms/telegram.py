@@ -1,4 +1,4 @@
-from foreman.ring.state import SupervisorState, TaskState, TaskStatus
+from foreman.ring.state import SupervisorState, TaskState
 
 
 def format_task_start(task: TaskState, total: int) -> str:
