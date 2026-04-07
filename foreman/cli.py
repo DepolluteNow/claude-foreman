@@ -213,13 +213,15 @@ def dispatch_issue(
     try:
         repo, number = _parse(issue_ref)
     except ValueError as e:
-        click.echo(f"❌ {e}", err=True); sys.exit(1)
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
 
     click.echo(f"Fetching {repo}#{number}...", err=True)
     try:
         issue = fetch_issue(repo, number)
     except RuntimeError as e:
-        click.echo(f"❌ {e}", err=True); sys.exit(1)
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
 
     click.echo(f"  #{issue.number}: {issue.title}", err=True)
 
@@ -230,7 +232,8 @@ def dispatch_issue(
         try:
             worktree = ensure_issue_worktree(issue, worktree, used_branch)
         except RuntimeError as e:
-            click.echo(f"❌ {e}", err=True); sys.exit(1)
+            click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
         click.echo(f"  Worktree: {worktree}", err=True)
     else:
         used_branch = branch or ""
@@ -239,7 +242,8 @@ def dispatch_issue(
     try:
         used_branch = ensure_branch(worktree, issue, custom_branch=used_branch)
     except RuntimeError as e:
-        click.echo(f"❌ {e}", err=True); sys.exit(1)
+        click.echo(f"❌ {e}", err=True)
+        sys.exit(1)
 
     click.echo(f"  Branch: {used_branch}", err=True)
 
@@ -285,7 +289,8 @@ def dispatch_issue(
     try:
         driver.send(ide, prompt, worktree=worktree)
     except Exception as e:
-        click.echo(f"❌ Dispatch failed: {e}", err=True); sys.exit(1)
+        click.echo(f"❌ Dispatch failed: {e}", err=True)
+        sys.exit(1)
 
     click.echo(f"  Dispatched #{issue.number} → {ide} ✅", err=True)
 
@@ -330,7 +335,8 @@ def wait(worktree: str, pre_head: str, timeout: int, interval: int,
         foreman wait --worktree ~/CascadeProjects/dn-windsurf \\
             --pre-head abc1234 --issue owner/repo#42 --auto-pr
     """
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
 
     worktree_path = Path(worktree).expanduser()
     deadline = time.time() + timeout
@@ -350,8 +356,7 @@ def wait(worktree: str, pre_head: str, timeout: int, interval: int,
             # ── Auto-PR ─────────────────────────────────────────────
             if issue and auto_pr:
                 from foreman.github import (parse_issue_ref as _parse, fetch_issue,
-                                            create_pr, post_issue_comment,
-                                            validate_closing_ref)
+                                            create_pr, post_issue_comment)
                 try:
                     repo, number = _parse(issue)
                     gh_issue = fetch_issue(repo, number)
@@ -578,8 +583,7 @@ def create_and_dispatch(
     # ── Delegate to dispatch-issue logic (invoke as sub-command) ─────
     # Re-use dispatch-issue via Click's invoke mechanism
     from foreman.github import (fetch_issue, ensure_branch, format_issue_prompt,
-                                post_issue_comment, worktree_is_dirty,
-                                branch_name as _bn)
+                                post_issue_comment, worktree_is_dirty)
     from foreman.drivers.ide_driver import IDEDriver
 
     issue = fetch_issue(repo, number)
@@ -588,7 +592,7 @@ def create_and_dispatch(
 
     dirty = worktree_is_dirty(worktree)
     if dirty:
-        click.echo(f"❌ Worktree has uncommitted changes — clean up first.", err=True)
+        click.echo("❌ Worktree has uncommitted changes — clean up first.", err=True)
         sys.exit(1)
 
     loop = SupervisorLoop.from_defaults()
@@ -620,7 +624,8 @@ def create_and_dispatch(
     try:
         driver.send(ide, prompt, worktree=worktree)
     except Exception as e:
-        click.echo(f"❌ Dispatch failed: {e}", err=True); sys.exit(1)
+        click.echo(f"❌ Dispatch failed: {e}", err=True)
+        sys.exit(1)
 
     click.echo(f"  Dispatched #{number} → {ide} ✅", err=True)
 
@@ -797,7 +802,8 @@ def queue(
         closing_ok, latest_msg = validate_closing_ref(issue_worktree, number)
         if not closing_ok:
             click.echo(
-                f"  ⚠️  Closing ref missing in commits. Latest: '{latest_msg}'", err=True
+                f"  ⚠️  Closing ref missing in commits. Latest: '{latest_msg}'",
+                err=True,
             )
 
         # ── Test runner ──────────────────────────────────────────────
@@ -833,7 +839,7 @@ def queue(
                 click.echo(f"  ⚠️  PR failed: {e}", err=True)
 
         results.append({"ref": ref, "status": "ok", "pr": pr_url})
-        click.echo(f"  ✅ Complete", err=True)
+        click.echo("  ✅ Complete", err=True)
 
     # ── Summary ──────────────────────────────────────────────────────
     click.echo("\n" + "=" * 60)
@@ -881,7 +887,12 @@ def resume(state_file: str):
 @_state_file_opt
 def status(state_file: str):
     """Show current foreman status."""
-    loop = SupervisorLoop.from_defaults()
+    config = SupervisorConfig.default()
+    loop = SupervisorLoop(
+        config=config,
+        state_path=Path(state_file).expanduser(),
+        learnings_path=Path(config.learnings_file).expanduser(),
+    )
     s = loop.get_status()
     if not s.get("active"):
         click.echo("No active foreman session.")
