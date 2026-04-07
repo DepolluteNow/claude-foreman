@@ -485,7 +485,9 @@ def verify(worktree: str, issue: str, run_tests: str, state_file: str):
     # ── TypeScript / lint errors (from foreman-bridge or tsc) ────────
     loop = SupervisorLoop.from_defaults()
     ctx = loop.get_review_context(worktree)
-    if ctx and ctx.errors:
+    if ctx is None:
+        click.echo("\n### TypeScript errors: (no active session — bridge diagnostics unavailable)")
+    elif ctx.errors:
         click.echo(f"\n### TypeScript errors ({len(ctx.errors)})")
         for e in ctx.errors:
             click.echo(f"  {e}")
@@ -575,7 +577,6 @@ def create_and_dispatch(
 
     # ── Delegate to dispatch-issue logic (invoke as sub-command) ─────
     # Re-use dispatch-issue via Click's invoke mechanism
-    from click.testing import CliRunner
     from foreman.github import (fetch_issue, ensure_branch, format_issue_prompt,
                                 post_issue_comment, worktree_is_dirty,
                                 branch_name as _bn)
