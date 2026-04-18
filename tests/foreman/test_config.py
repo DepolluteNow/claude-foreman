@@ -1,6 +1,5 @@
-import pytest
 
-from foreman.config import IDEConfig, ModelInfo, SupervisorConfig
+from foreman.config import SupervisorConfig
 
 
 def test_default_config_has_windsurf_and_antigravity():

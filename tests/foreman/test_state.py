@@ -1,7 +1,4 @@
-import json
-import pytest
-from pathlib import Path
-from foreman.ring.state import SupervisorState, TaskState, TaskStatus
+from foreman.ring.state import SupervisorState, TaskStatus
 
 
 def test_create_new_state():

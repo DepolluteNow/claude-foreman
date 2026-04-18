@@ -1,6 +1,4 @@
-import json
 import pytest
-from pathlib import Path
 from foreman.ring.learnings import Learnings
 from foreman.ring.state import SupervisorState, TaskStatus
 

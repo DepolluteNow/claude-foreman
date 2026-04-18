@@ -1,4 +1,3 @@
-import pytest
 from foreman.ring.takeover import CircleDetector, CircleType
 
 

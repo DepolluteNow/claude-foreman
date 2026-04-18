@@ -1,15 +1,11 @@
 """Tests for the smart model selection system."""
 
 import pytest
-import os
-import tempfile
 from foreman.models import (
     analyze_task,
     recommend_model,
     recommend_for_task,
     format_recommendation,
-    TaskAnalysis,
-    ModelInfo,
     MODEL_REGISTRY,
 )
 

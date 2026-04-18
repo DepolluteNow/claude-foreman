@@ -29,6 +29,9 @@ dependencies = [
     "click>=8.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
 [project.scripts]
 foreman = "foreman.cli:cli"
 
@@ -37,6 +40,9 @@ Homepage = "https://github.com/DepolluteNow/claude-foreman"
 Repository = "https://github.com/DepolluteNow/claude-foreman"
 Issues = "https://github.com/DepolluteNow/claude-foreman/issues"
 "Depollute Now!" = "https://depollutenow.com"
+
+[tool.hatch.build.targets.wheel]
+packages = ["foreman"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

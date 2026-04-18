@@ -17,7 +17,6 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -260,12 +259,3 @@ def format_issue_prompt(issue: GitHubIssue, worktree: str, branch: str) -> str:
         f"- Fix any compile or lint errors before committing\n"
         f"- The commit message MUST contain `closes #{issue.number}`\n"
     )
-
-
-import json
-import re
-import subprocess
-from dataclasses import dataclass
-from pathlib import Path
-
-

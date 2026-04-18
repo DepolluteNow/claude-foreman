@@ -2,190 +2,182 @@
 
 > Claude thinks. Free models type. Foreman makes sure it's done right.
 
-An autonomous coding supervisor that routes tasks to free AI models while you sleep. Named after George Foreman — because every coding session deserves a heavyweight champion in your corner.
-
-## The Fight Card
-
-Claude Foreman is your **corner coach**. It decomposes your goal into tasks, dispatches each as a **jab**, **hook**, or **uppercut** to the right sparring partner (free AI model), watches the round play out, and steps into the ring when your partner goes in circles.
+An autonomous coding supervisor that routes GitHub issues to free AI models (Kimi, Gemini) running in Windsurf, Antigravity, or Cursor — while Claude handles decomposition, review, and escalation.
 
 ```
-                                  CORNER (Claude)
-                          decompose | review | takeover
-                                    |
-                    +---------+-----+-----+---------+
-                    |                                |
-            WINDSURF RING                    ANTIGRAVITY RING
-            +-----------+                    +--------------+
-            | Kimi      |                    | Gemini 3.1   |
-            | SWE 1.5   |                    | Gemini Flash |
-            +-----------+                    +--------------+
-              jab/hook                        uppercut/cross
-          (quick, standard)                (complex, multi-file)
+                              CORNER (Claude)
+                      decompose | review | takeover
+                                |
+                +---------+-----+-----+---------+
+                |                                |
+        WINDSURF RING                    ANTIGRAVITY RING
+        +-----------+                    +--------------+
+        | Kimi      |                    | Gemini 3.1   |
+        | SWE 1.5   |                    | Gemini Flash |
+        +-----------+                    +--------------+
+          (quick, standard)               (complex, multi-file)
 ```
 
-## Weight Classes
+## Requirements
 
-| Weight Class | Punch | Sparring Partner | When |
-|:---:|:---:|:---:|:---|
-| **Flyweight** | Jab | SWE 1.5 (Windsurf) | Rename, move, add import, boilerplate |
-| **Middleweight** | Hook | Kimi (Windsurf) | New component, API route, write test |
-| **Heavyweight** | Uppercut | Gemini 3.1 (Antigravity) | Refactor, migrate, 3+ files |
-| **Champion** | Cross | Kimi (Windsurf) | Payload CMS, codebase-specific patterns |
+- **macOS** (dispatch uses `windsurf chat` CLI + AppleScript fallback)
+- **Python 3.10+**
+- **[`gh` CLI](https://cli.github.com/)** — authenticated (`gh auth login`)
+- **Windsurf** and/or **Antigravity** installed in `/Applications/`
+- **Claude Code** with the `/claude-foreman` skill installed (see below)
 
-## Rounds
+## Install
 
-Every task goes through rounds:
+```bash
+git clone https://github.com/DepolluteNow/claude-foreman.git
+cd claude-foreman
+pip install -e .
+foreman --help   # verify
+```
 
-1. **DECOMPOSE** — Claude breaks the goal into ordered task specs (one Opus turn)
-2. **ROUTE** — Heuristic classifies each task by weight class (zero cost)
-3. **DISPATCH** — Sends the punch to the right ring (near-zero tokens)
-4. **WAIT** — Watches the sparring partner work via `git diff` polling (zero tokens)
-5. **REVIEW** — Claude reads the diff, scores the round (one Sonnet turn)
-6. **DECISION** —
-   - **Clean round** — Next task
-   - **Standing 8-count** — Minor fix, retry (max 2)
-   - **Going in circles** — Claude takes over (max 50 lines)
-   - **Throw in the towel** — Escalate to human via Telegram
+## Install the Claude Code Skill
 
-## Token Budget (per 10-task bout)
+The `/claude-foreman` skill is what Claude uses to drive the `foreman` CLI.
+Install it globally so it's available in every project:
 
-| Phase | Tokens | Notes |
-|-------|--------|-------|
-| DECOMPOSE | ~5K (once) | Front-load all thinking |
-| ROUTE | 0 | Heuristic only |
-| DISPATCH | ~500 | Format prompt |
-| WAIT | 0 | Shell polling |
-| REVIEW | ~3K | Read diff |
-| TAKEOVER | ~2K (rare) | Write fix |
-| **Total** | **~35-50K** | Free models do all the coding |
+```bash
+mkdir -p ~/.claude/skills/claude-foreman
+cp .claude/skills/claude-foreman/SKILL.md ~/.claude/skills/claude-foreman/SKILL.md
+```
+
+Then in any Claude Code session, type `/claude-foreman` to invoke it.
+
+## Install the VS Code Bridge Extension (optional but recommended)
+
+The foreman-bridge extension gives Claude live IDE state (branch, diagnostics, file saves).
+Without it, pre-flight checks are skipped and timeout diagnosis is limited.
+
+```bash
+cd extension/foreman-bridge
+npm install
+npm run build
+# Then install the .vsix in Windsurf / VS Code:
+# Extensions → ··· → Install from VSIX → pick out/foreman-bridge-*.vsix
+```
 
 ## Quick Start
 
-### Install
+Once installed, open Claude Code in any project and run:
 
+```
+/claude-foreman owner/repo#42
+```
+
+Claude will fetch the issue, create a branch, dispatch to Windsurf, wait for a commit, verify the diff and closing reference, and optionally create a PR — all automatically.
+
+Or dispatch multiple issues while you sleep:
+
+```
+/claude-foreman queue owner/repo#42 owner/repo#43 owner/repo#44
+```
+
+## How It Works
+
+Every dispatch cycle is 3 tool calls and costs ~1,300 Claude tokens:
+
+| Phase | What happens | Cost |
+|-------|-------------|------|
+| **Phase 1** `dispatch-issue` | Fetch issue, create branch, dirty-check, open IDE, send prompt | ~400 tokens |
+| **Phase 2** `wait` | Poll `git log` until new commit detected; auto-create PR | ~400 tokens |
+| **Phase 3** `verify` | Diff summary, closing-ref check, optional test run | ~500 tokens |
+
+The free model (Kimi, Gemini) does all the actual coding — zero tokens for that part.
+
+## Workflows
+
+### Dispatch an existing issue
 ```bash
-pip install claude-foreman
-# or
-git clone https://github.com/DepolluteNow/claude-foreman.git
-cd claude-foreman && pip install -e .
+/claude-foreman owner/repo#42
 ```
 
-### Launch (in Claude Code)
-
+### Create an issue and dispatch it in one shot
 ```bash
-claude --channels plugin:telegram@claude-plugins-official \
-       --dangerously-load-development-channels server:claude-peers
+/claude-foreman create owner/repo "Add dark mode toggle"
+```
+Claude writes the spec, creates the issue on GitHub, and dispatches immediately.
+
+### Queue multiple issues end-to-end
+```bash
+/claude-foreman queue owner/repo#42 owner/repo#43 owner/repo#44
 ```
 
-Then tell Claude:
-```
-Start supervisor. Goal: implement user authentication.
-Use Windsurf (Kimi) and Antigravity (Gemini 3.1).
-```
-
-### Resume after crash
-```
-Resume supervisor.
+### Dispatch a task file (no GitHub issue needed)
+```bash
+/claude-foreman .tasks/010-auth-flow.md
 ```
 
-State persists to `~/.claude/foreman-state.json`. Survives context compression, session crashes, and Mac sleep.
+## Safety Guards
 
-## Self-Improvement (The Training Camp)
+Every dispatch automatically enforces:
 
-After each bout, Foreman runs a **retrospective**:
-- Measures first-try rate per model per task type
-- Updates routing weights (adaptive routing)
-- Guards against regressions (if rate drops, reverts changes)
-- Persists learnings to `~/.claude/foreman-learnings.json`
-
-Each project makes the next one cheaper and faster. The system cannot degrade over time.
-
-```json
-{
-  "first_try_rate_history": [0.50, 0.65, 0.72, 0.80],
-  "model_performance": {
-    "kimi": {"standard": 0.85, "complex": 0.55},
-    "gemini-3.1": {"complex": 0.78, "standard": 0.80}
-  },
-  "patterns": {
-    "always": ["specify exact file paths", "paste relevant context"],
-    "never": ["say 'fix the bug' without the error message"]
-  }
-}
-```
-
-## Circle Detection (Going in Circles Guard)
-
-Foreman detects three patterns that mean the sparring partner is looping:
-
-| Pattern | Detection | Action |
-|---------|-----------|--------|
-| **Same Region** | Same file + same line range edited twice | Takeover |
-| **Same Error** | Same TypeScript/lint error on retry | Takeover |
-| **Net Zero** | Adding what was previously removed | Takeover |
-
-When detected, Claude steps into the ring and writes the fix directly (max 50 lines). If the fix would be larger, it escalates to you via Telegram.
+- **Dirty worktree check** — refuses to dispatch if uncommitted changes exist
+- **Pre-flight** — verifies IDE is on the correct branch (no wrong-window dispatch)
+- **HEAD-hash wait** — `foreman wait` compares git HEAD, not `--since` (no false positives)
+- **Closing reference check** — `foreman verify` confirms commit contains `closes #N`
+- **Timeout diagnosis** — on timeout, takes a screenshot + queries bridge `/health`
 
 ## Architecture
 
 ```
 foreman/
-├── bridge_interface.py     # Abstract interface for AI panel bridges
-├── config.py               # IDE registry, model catalog, paths
-├── cli.py                  # Click CLI: foreman start/resume/status/stop
-├── ring/                   # The Ring — where the fight happens
-│   ├── loop.py             # Main state machine (the referee)
-│   ├── router.py           # Smart task router (the matchmaker)
-│   ├── watcher.py          # Filesystem watcher (the judges)
-│   ├── state.py            # State persistence (the scorecard)
-│   ├── takeover.py         # Circle detection + takeover (the corner)
-│   └── learnings.py        # Self-improvement loop (the training camp)
-├── drivers/                # IDE Bridges — how punches land
-│   ├── cascade_bridge.py   # Windsurf (Cascade AI panel)
-│   ├── gemini_bridge.py    # Antigravity (Gemini AI panel)
-│   ├── ide_driver.py       # Unified driver (routes to right ring)
+├── cli.py                  # foreman CLI (11 commands)
+├── github.py               # gh CLI wrappers (fetch, branch, PR, comment)
+├── bridge_interface.py     # Abstract IDE bridge interface
+├── config.py               # IDE registry, model catalog
+├── models.py               # Model routing heuristics
+├── drivers/
+│   ├── cascade_bridge.py   # Windsurf (windsurf chat CLI + AppleScript fallback)
+│   ├── gemini_bridge.py    # Antigravity
+│   ├── cursor_bridge.py    # Cursor
 │   └── applescript/        # macOS automation scripts
-│       ├── detect_ide.scpt
-│       ├── windsurf_cascade.scpt
-│       └── antigravity_gemini.scpt
+├── ring/
+│   ├── loop.py             # Supervisor state machine
+│   ├── router.py           # Task complexity classifier
+│   ├── watcher.py          # git-based completion detector
+│   ├── state.py            # Session persistence (~/.claude/foreman-state.json)
+│   ├── takeover.py         # Circle detection (same-region / same-error / net-zero)
+│   └── learnings.py        # Adaptive routing from past sessions
 └── comms/
-    └── telegram.py         # Message formatting for Telegram channel
+    └── telegram.py         # Escalation message formatting
+
+extension/
+└── foreman-bridge/         # VS Code extension — exposes IDE state over HTTP
+    └── src/extension.ts    # /git, /health, /files, /diagnostics endpoints
 ```
 
-## Adding a New Ring (IDE Support)
+## Token Budget
 
-Claude Foreman works with any VS Code fork. To add support for a new IDE (e.g., Cursor):
+| Workflow | Tool calls | Est. tokens |
+|----------|-----------|-------------|
+| Dispatch issue + wait + verify | 3 | ~1,300 |
+| Create-and-dispatch + wait + verify | 3 | ~1,400 |
+| Queue (N issues) | 1 | ~500 + N×200 |
+| Task file (preflight + dispatch + wait + verify) | 4 | ~1,600 |
 
-1. Create `foreman/drivers/cursor_bridge.py` implementing `AIBridge`
-2. Create `foreman/drivers/applescript/cursor_ai.scpt`
-3. Register in `foreman/drivers/ide_driver.py` BRIDGE_REGISTRY
-4. Add IDE config in `foreman/config.py`
+At $15/M tokens (Claude Sonnet), dispatching 10 issues costs under $0.20 in Claude tokens.
+The free models (Kimi, Gemini) write all the code at $0.
 
-The bridge interface is 6 methods: `send`, `status`, `read_output`, `accept_all`, `reject`, `recalibrate`.
+## Self-Improvement
+
+After each session, Foreman runs a retrospective:
+- Measures first-try rate per model per task type
+- Updates routing weights (adaptive routing)
+- Guards against regressions — reverts routing changes if success rate drops
+- Persists to `~/.claude/foreman-learnings.json`
 
 ## Tests
 
 ```bash
-python3 -m pytest tests/foreman/ -v
-# 83 tests, <0.5s
+python -m pytest tests/foreman/ -v   # 115 tests, <1s
 ```
 
-## Why "Foreman"?
-
-George Foreman was known for his **devastating power** and **relentless pressure**. He didn't dance around — he moved forward and delivered. That's what this tool does: it doesn't waste tokens on ceremony. It decomposes, dispatches, reviews, and moves on.
-
-And like George Foreman's famous grill, it just works. Set it up, let it run, come back to done work.
-
-## Philosophy
-
-> *"The question isn't who is going to let me; it's who is going to stop me."* — George Foreman (attributed)
-
-Claude Foreman embodies **sovereign abundance through automation**: the best quality for the least cost. Claude's intelligence is expensive and precious — use it for thinking, not typing. Let the free models type.
+CI runs on Python 3.10, 3.11, 3.12, and 3.13.
 
 ## License
 
-MIT
-
-## Credits
-
-Built by [Depollute Now!](https://depollutenow.com) — the human movement for planetary restoration.
+MIT — Built by [Depollute Now!](https://depollutenow.com)

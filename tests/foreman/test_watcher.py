@@ -1,8 +1,6 @@
 import pytest
 import subprocess
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-from foreman.ring.watcher import FilesystemWatcher, WatchResult
+from foreman.ring.watcher import FilesystemWatcher
 
 
 @pytest.fixture
@@ -29,6 +27,9 @@ def test_changes_detected(watcher, tmp_path):
 
 def test_diff_summary(watcher, tmp_path):
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, capture_output=True)
     (tmp_path / "file.ts").write_text("line1")
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)

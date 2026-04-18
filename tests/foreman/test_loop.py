@@ -2,12 +2,9 @@
 
 import json
 import pytest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
-from foreman.ring.loop import SupervisorLoop, ReviewContext, DispatchResult
+from foreman.ring.loop import SupervisorLoop
 from foreman.ring.state import SupervisorState, TaskStatus
-from foreman.ring.takeover import CircleType
 from foreman.config import SupervisorConfig
 
 

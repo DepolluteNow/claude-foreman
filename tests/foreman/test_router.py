@@ -1,5 +1,5 @@
 import pytest
-from foreman.ring.router import TaskRouter, TaskClassification
+from foreman.ring.router import TaskRouter
 from foreman.config import SupervisorConfig
 
 

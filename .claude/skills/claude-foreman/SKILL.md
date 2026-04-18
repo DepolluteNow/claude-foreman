@@ -23,11 +23,11 @@ Every phase is ONE Bash tool call. Never poll in multiple calls. Never read full
 
 ## Plugin
 
-All logic lives in the `claude-foreman` Python package.
-Source: `~/CascadeProjects/claude-foreman/`
+All logic lives in the `claude-foreman` Python package, installed as the `foreman` CLI.
 
 ```bash
-foreman --help   # verify CLI is installed
+foreman --help   # verify the CLI is on PATH
+# If not found: pip install -e /path/to/claude-foreman
 ```
 
 ## Arguments
