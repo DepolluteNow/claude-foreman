@@ -6,6 +6,7 @@ import type { BranchState, CiState, ThreadOverview, ThreadSummary } from "./thre
 import type { TrustTier } from "./referee/readiness.js";
 import { COACH_BACKENDS, ENV_DEFAULT_KEY, resolveCoachBackend } from "./manager/coach-backends.js";
 import { ringPanel } from "./ringmap.js";
+import { rosterFor } from "./fighters.js";
 
 const NO_THREADS: ThreadOverview = { open: [], resolvedCount: 0, total: 0 };
 
@@ -585,169 +586,432 @@ function coachPanel(store: Store): string {
   </section>`;
 }
 
+// ---------------------------------------------------------------------------
+// Fight Night layout — one structure, two skins (epic #182, phase 1).
+// Skin = CSS tokens only; zero logic forks (owner rule).
+// ---------------------------------------------------------------------------
+
+/** Which floor column a task stands in. */
+function floorColumn(t: TaskRow): "corner" | "ring" | "judges" | "books" {
+  switch (t.status) {
+    case "queued": return "corner";
+    case "claimed":
+    case "changes_requested": return "ring";
+    case "in_review":
+    case "approved":
+    case "failed": return "judges";
+    case "done":
+    case "stopped": return "books";
+  }
+}
+
+/** One bout card on the floor — compact but fully functional (merge, stop, threads). */
+function boutCard(t: TaskRow, store: Store, threadMap: ThreadMap, all: TaskRow[], showRepo: boolean): string {
+  const s = plainStatus(t);
+  const live = threadMap[threadKey(t)];
+  const last = store.lastCommentFor(t.repo, t.issue, t.pr);
+  const warn = pickupVerdict(t, last);
+  const col = floorColumn(t);
+  const health = col === "ring" ? branchHealth(t, live, all, threadMap) : "";
+  return `<div class="bout bout-${col}${t.status === "failed" ? " bout-failed" : ""}">
+    <div class="bout-head">
+      ${showRepo ? `<span class="bout-repo">${esc(projectName(t.repo))}</span>` : ""}
+      <span class="bout-title">${esc(t.title ?? `Task #${t.issue}`)}</span>
+      ${controlButtons(t)}
+    </div>
+    <div class="bout-status" style="color:${s.color}">${s.text}${s.action ? ` <a class="action" href="${s.action.url}" target="_blank">${s.action.label} →</a>` : ""}</div>
+    ${trailLine(t, live?.ci)}
+    ${warn ? `<div class="pickup-warn">⚠ ${esc(warn)}</div>` : ""}
+    ${health}
+    ${checklistBlock(store.listRevisionPoints(t.repo, t.issue))}
+    ${threadBlock(t, live?.threads ?? NO_THREADS)}
+    ${acceptBlock(t, live?.ci)}
+  </div>`;
+}
+
+/** The four-column floor for the tasks in scope. */
+function floorPanel(tasks: TaskRow[], store: Store, threadMap: ThreadMap, showRepo: boolean): string {
+  const cols: { key: ReturnType<typeof floorColumn>; label: string; cls: string }[] = [
+    { key: "corner", label: "IN THE CORNER", cls: "col-corner" },
+    { key: "ring", label: "● IN THE RING", cls: "col-ring" },
+    { key: "judges", label: "JUDGES’ TABLE", cls: "col-judges" },
+    { key: "books", label: "IN THE BOOKS", cls: "col-books" },
+  ];
+  const active = tasks.filter((t) => t.status !== "stopped");
+  const stopped = tasks.filter((t) => t.status === "stopped");
+  const colHtml = cols.map((c) => {
+    let mine = active.filter((t) => floorColumn(t) === c.key);
+    if (c.key === "books") mine = mine.slice(0, 6); // the books hold history; show the recent wins
+    const cards = mine.map((t) => boutCard(t, store, threadMap, active, showRepo)).join("");
+    return `<div class="floor-col ${c.cls}">
+      <h6>${c.label} <span>${mine.length}</span></h6>
+      ${cards || `<div class="floor-empty">—</div>`}
+    </div>`;
+  }).join("");
+  const stoppedNote = stopped.length
+    ? `<details class="stopped-note"><summary>${stopped.length} stopped/archived bout${stopped.length > 1 ? "s" : ""} — relaunchable</summary>${stopped.map((t) => boutCard(t, store, threadMap, active, showRepo)).join("")}</details>`
+    : "";
+  return `<section class="fn-panel"><h4 class="fn-panel-title">THE FLOOR</h4><div class="floor">${colHtml}</div>${stoppedNote}</section>`;
+}
+
+/** Referee's log — the latest recorded traffic for the scope, newest first. */
+function refereeLog(store: Store, repoNames: string[]): string {
+  const rows = repoNames
+    .flatMap((r) => store.recentComments(r, 8))
+    .sort((a, b) => b.created_at - a.created_at)
+    .slice(0, 10);
+  if (rows.length === 0) return "";
+  const line = (c: CommentRow) => {
+    const when = new Date(c.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const kind = c.msg_type ? c.msg_type.toUpperCase().replace(/-/g, " ") : "COMMENT";
+    const kindCls = /approval|merged/.test(c.msg_type ?? "") ? "lk-win" : /revision|timeout|reassignment/.test(c.msg_type ?? "") ? "lk-live" : "lk-gold";
+    return `<div class="log-row"><time>${when}</time><div><b class="${kindCls}">${esc(kind)}</b> <span class="log-who">${esc(displayAuthor(c))}</span> — ${esc(c.snippet.slice(0, 110))}${c.snippet.length > 110 ? "…" : ""} <span class="log-where">#${c.issue}</span></div></div>`;
+  };
+  return `<section class="fn-panel"><h4 class="fn-panel-title">REFEREE&rsquo;S LOG</h4>${rows.map(line).join("")}</section>`;
+}
+
+/** The roster — every fighter with model, load, and honest availability. */
+function rosterPanel(tasks: TaskRow[], store: Store): string {
+  const roster = rosterFor(config.agents);
+  const cards = roster.map((f) => {
+    const mine = tasks.filter((t) => t.agent === f.agent && ["claimed", "changes_requested"].includes(t.status)).length;
+    const limit = config.agentLimits[f.agent] ?? config.defaultAgentLimit;
+    const rl = store.agentStatus(f.agent).state === "rate_limited";
+    const busyLine = rl ? `<div class="f-busy" style="color:var(--fn-live)">⛔ rate-limited</div>`
+      : mine > 0 ? `<div class="f-busy" style="color:var(--fn-live)">● in the ring · ${mine}</div>` : "";
+    return `<div class="fighter-card" data-agent="${esc(f.agent)}" data-pingable="${f.ping ? 1 : 0}">
+      <div class="f-head"><i class="f-dot"></i><b>${esc(f.label)}</b><span class="f-load">${mine}/${limit}</span></div>
+      <div class="f-model">${esc(f.model)}</div>
+      ${busyLine}
+      <div class="f-det">${f.ping ? "pinging…" : "not pingable (no CLI/API)"}</div>
+      ${f.ping ? `<button type="button" class="f-ping" onclick="window.pingFighter('${esc(f.agent)}')">PING</button>` : ""}
+    </div>`;
+  }).join("");
+  return `<h5 class="side-h">THE ROSTER</h5>${cards}
+  <script>
+    window.pingFighter = async function (agent) {
+      const card = document.querySelector('.fighter-card[data-agent="' + agent + '"]');
+      if (!card) return;
+      const det = card.querySelector('.f-det'), dot = card.querySelector('.f-dot');
+      det.textContent = 'pinging…';
+      try {
+        const r = await fetch('/api/ping/' + encodeURIComponent(agent), { method: 'POST' });
+        const j = await r.json();
+        dot.style.background = j.ok ? 'var(--fn-win)' : (j.pingable ? 'var(--fn-live)' : 'var(--fn-faint)');
+        dot.style.boxShadow = j.ok ? '0 0 6px var(--fn-win)' : 'none';
+        det.textContent = j.ok ? '✓ available — ' + j.detail : (j.pingable ? '✗ ' + j.detail : j.detail);
+      } catch (e) { det.textContent = '✗ ping failed — server away?'; }
+    };
+    document.querySelectorAll('.fighter-card[data-pingable="1"]').forEach(function (c) {
+      window.pingFighter(c.getAttribute('data-agent'));
+    });
+  </script>`;
+}
+
+/** FIGHT CARDS — repos as folders in the sidebar, grouped by owner; quiet repos fold away. */
+function fightCards(tasks: TaskRow[], repos: RepoOption[], selectedRepo: string | null): string {
+  const repoNames = [...new Set([...tasks.map((t) => t.repo), ...repos.map((r) => r.fullName)])];
+  const entry = (r: string) => {
+    const mine = tasks.filter((t) => t.repo === r);
+    const won = mine.filter((t) => t.status === "done").length;
+    const live = mine.filter((t) => ["claimed", "changes_requested"].includes(t.status)).length;
+    const queued = mine.filter((t) => t.status === "queued").length;
+    const on = r === selectedRepo;
+    const counts = [won ? `${won}W` : "", live ? `${live} LIVE` : "", queued ? `${queued}Q` : ""].filter(Boolean).join(" · ") || "quiet";
+    return `<a class="card-entry${on ? " on" : ""}" href="/dashboard?card=${encodeURIComponent(r)}">
+      ${esc(projectName(r))}
+      <span class="card-counts${live ? " has-live" : ""}">${counts}</span>
+    </a>`;
+  };
+  const hasWork = (r: string) => tasks.some((t) => t.repo === r) || r === selectedRepo;
+  const byOwner = new Map<string, string[]>();
+  for (const r of repoNames) {
+    const owner = r.split("/")[0].toUpperCase();
+    byOwner.set(owner, [...(byOwner.get(owner) ?? []), r]);
+  }
+  const folders = [...byOwner.entries()].map(([owner, rs]) => {
+    const active = rs.filter(hasWork);
+    const quiet = rs.filter((r) => !hasWork(r));
+    const quietBlock = quiet.length
+      ? `<details class="quiet-cards"><summary>${quiet.length} quiet card${quiet.length > 1 ? "s" : ""}</summary>${quiet.map(entry).join("")}</details>`
+      : "";
+    return `<div class="card-folder">▾ ${esc(owner)}</div>${active.map(entry).join("")}${quietBlock}`;
+  }).join("");
+  const all = `<a class="card-entry${!selectedRepo ? " on" : ""}" href="/dashboard">All cards<span class="card-counts">${tasks.length ? `${tasks.length} bouts total` : "empty"}</span></a>`;
+  return `<h5 class="side-h">FIGHT CARDS</h5>${all}${folders}`;
+}
+
 export function renderDashboard(
   store: Store,
   repos: RepoOption[],
   notice?: string,
   threadMap: ThreadMap = {},
   repoBranches: RepoBranches = {},
-  trustTiers: Record<string, string> = {}
+  trustTiers: Record<string, string> = {},
+  selectedRepo: string | null = null
 ): string {
-  const tasks = store.listTasks();
+  void repoBranches; // superseded by the roster in the Fight Night layout
+  const allTasks = store.listTasks();
   const jobs = store.recentJobs(10);
-  const repoNames = [...new Set(tasks.map((t) => t.repo))];
-  const attention = attentionItems(tasks, jobs, store, threadMap);
-  const working = tasks.filter((t) => ["claimed", "in_review", "changes_requested"].includes(t.status)).length;
+  const repoNames = [...new Set(allTasks.map((t) => t.repo))];
+  if (selectedRepo && !repoNames.includes(selectedRepo) && !repos.some((r) => r.fullName === selectedRepo)) selectedRepo = null;
+  const scoped = selectedRepo ? allTasks.filter((t) => t.repo === selectedRepo) : allTasks;
+  const scopeRepos = selectedRepo ? [selectedRepo] : repoNames;
+
+  const attention = attentionItems(scoped, jobs, store, threadMap);
+  const bell = attention.length;
+
+  // Signals: engine heartbeat, worst CI in scope, decisions awaiting the owner.
+  const lastTick = parseInt(store.getSetting("last_worker_tick") ?? "0", 10);
+  const engineUp = lastTick > 0 && Date.now() - lastTick < 45_000;
+  const cis = scoped.map((t) => threadMap[threadKey(t)]?.ci?.overall).filter(Boolean);
+  const ciState = cis.includes("red") ? "live" : cis.includes("pending") ? "gold" : "win";
+  const ciLabel = cis.includes("red") ? "CI RED" : cis.includes("pending") ? "CI RUNNING" : "CI";
+
+  // Round clock: how long the current round has been running (latest activity on a live bout).
+  const liveTasks = scoped.filter((t) => ["claimed", "changes_requested", "in_review"].includes(t.status));
+  const round = liveTasks.length ? Math.max(...liveTasks.map((t) => t.revision_round)) + 1 : 0;
+  const lastMove = liveTasks.length ? Math.max(...liveTasks.map((t) => t.updated_at)) : 0;
+  const elapsedMin = lastMove ? Math.floor((Date.now() - lastMove) / 60000) : 0;
+  const clock = liveTasks.length
+    ? `<span class="fn-clock"><small>ROUND ${round}</small>${String(Math.floor(elapsedMin / 60)).padStart(2, "0")}:${String(elapsedMin % 60).padStart(2, "0")}<em> elapsed</em></span>`
+    : "";
+
+  const scopeLabel = selectedRepo ? projectName(selectedRepo) : "All cards";
+  const tally = {
+    won: scoped.filter((t) => t.status === "done").length,
+    live: liveTasks.length,
+    you: attention.length,
+    card: scoped.filter((t) => t.status === "queued").length,
+  };
+  const tier = selectedRepo ? trustTiers[selectedRepo] ?? "L1" : null;
+
+  const coach = resolveCoachBackend(store);
   const cost = forecastRunCost(store);
-
-  const costHtml = `<section class="card cost-panel">
-    <h2>💰 Cost forecast</h2>
-    <p>${esc(cost.summary)}</p>
-    <p class="point-meta">
-      ${cost.remainingUsd !== null ? `Remaining budget: <strong>$${cost.remainingUsd.toFixed(2)}</strong> · Used: <strong>${cost.usedPct}%</strong>` : "No budget ceiling configured."}
-    </p>
-  </section>`;
-
-  const archiveBtn = `<form method="post" action="/dashboard/archive-stale" style="margin-left:auto" onsubmit="return confirm('Archive everything untouched for 7+ days? Each task flips to Stopped and can be relaunched from its project card.')">
-        <button type="button" onclick="this.closest('form').requestSubmit()" style="margin:0;padding:0.3rem 0.9rem;font-size:0.8rem;background:transparent;color:#d29922;border:1px solid #d2992288">🧹 Archive stale (7+ days)</button>
-      </form>`;
-  const attentionHtml = attention.length
-    ? `<section class="card attention"><div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap"><h2 style="margin:0">👋 Needs you</h2>${archiveBtn}</div><ul>${attention.join("")}</ul></section>`
-    : `<section class="card calm"><h2>✅ Nothing needs you right now</h2><p>${
-        working > 0
-          ? `Your AI team is working on ${working} thing${working > 1 ? "s" : ""}. Check back later.`
-          : tasks.length === 0
-            ? `No work in progress yet. Describe what you want below to get started.`
-            : `All quiet. Request new work below whenever you're ready.`
-      }</p></section>`;
-
-  const projects = repoNames
-    .map((r) => projectCard(r, tasks.filter((t) => t.repo === r), store, threadMap, repoBranches, trustTiers))
-    .join("");
-
-  const repoOptions = repos
-    .map((r) => `<option value="${esc(r.fullName)}">${esc(projectName(r.fullName))}</option>`)
-    .join("");
+  const repoOptions = repos.map((r) => `<option value="${esc(r.fullName)}">${esc(projectName(r.fullName))}</option>`).join("");
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-skin="dark">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="60">
+<meta http-equiv="refresh" content="120">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>My AI team</title>
+<title>Foreman — ${esc(scopeLabel)}</title>
+<script>try { document.documentElement.dataset.skin = localStorage.getItem('foreman-skin') || 'dark'; } catch (e) {}</script>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1.2rem; line-height: 1.5; }
-  h1 { font-size: 1.6rem; margin-bottom: 0.2rem; }
-  .subtitle { opacity: 0.65; margin-top: 0; }
-  .card { border: 1px solid #8883; border-radius: 12px; padding: 1.1rem 1.4rem; margin: 1.2rem 0; }
-  .card h2 { font-size: 1.15rem; margin: 0 0 0.4rem; }
-  .attention { border-color: #d4a72c88; background: #d4a72c12; }
-  .calm { border-color: #2da44e55; background: #2da44e0d; }
-  .attention ul { margin: 0.4rem 0 0; padding-left: 1.2rem; } .attention li { margin: 0.45rem 0; }
-  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
-  .progress-label { font-size: 0.85rem; opacity: 0.65; }
-  .tier-badge { font-size: 0.78rem; padding: 2px 10px; border-radius: 999px; border: 1px solid #8885; }
-  .bar { height: 8px; border-radius: 99px; background: #8883; overflow: hidden; margin: 0.5rem 0 1rem; }
-  .bar-fill { height: 100%; background: #2da44e; transition: width 0.4s; }
-  .items { list-style: none; margin: 0; padding: 0; }
-  .items li { padding: 0.5rem 0; border-top: 1px solid #8882; }
-  .item-row { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
-  .last-comment { font-size: 0.8rem; opacity: 0.7; margin: 0.25rem 0 0 1.35rem; }
-  .pickup-warn { font-size: 0.83rem; color: #d29922; margin: 0.25rem 0 0 1.35rem; }
-  .trail { font-size: 0.8rem; margin: 0.3rem 0 0 1.35rem; }
+  html[data-skin="dark"] {
+    --fn-bg: #0b0a0e; --fn-side: #0e0c12; --fn-panel: #141218; --fn-line: #26202e;
+    --fn-ink: #f2ead9; --fn-dim: #9b8f7c; --fn-faint: #55495c;
+    --fn-gold: #d3a95f; --fn-live: #c04a5e; --fn-win: #58a86e;
+    --fn-display: Georgia, "Palatino Linotype", serif; --fn-shadow: none;
+  }
+  html[data-skin="light"] {
+    --fn-bg: #f2f1ec; --fn-side: #e9e7df; --fn-panel: #ffffff; --fn-line: #d6d3c8;
+    --fn-ink: #26282b; --fn-dim: #8b877c; --fn-faint: #b9b5a8;
+    --fn-gold: #a98f4d; --fn-live: #c73e33; --fn-win: #4c8054;
+    --fn-display: "American Typewriter", "Courier New", serif; --fn-shadow: 0 1px 4px #0002;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fn-bg); color: var(--fn-ink); font-family: -apple-system, "Segoe UI", sans-serif; line-height: 1.5; }
+  a { color: var(--fn-gold); text-decoration: none; } a:hover { text-decoration: underline; }
+  h1,h2,h3,h4 { font-family: var(--fn-display); }
+  .fn-nav { display: flex; align-items: center; gap: 1.6rem; padding: 0.85rem 1.6rem; border-bottom: 1px solid var(--fn-line); background: var(--fn-side); }
+  .fn-wordmark { font-family: var(--fn-display); font-weight: 700; letter-spacing: 0.3em; color: var(--fn-gold); font-size: 1rem; }
+  .fn-nav a.navlink { color: var(--fn-dim); font-size: 0.7rem; letter-spacing: 0.18em; }
+  .fn-nav a.navlink:hover { color: var(--fn-ink); text-decoration: none; }
+  .fn-nav .right { margin-left: auto; display: flex; align-items: center; gap: 0.9rem; }
+  .bell { position: relative; font-size: 1.05rem; color: inherit; }
+  .bell b { position: absolute; top: -7px; right: -10px; background: var(--fn-live); color: #fff; font-size: 0.58rem; border-radius: 999px; padding: 1px 5px; font-family: sans-serif; }
+  .coach-pill { font-size: 0.7rem; letter-spacing: 0.06em; color: var(--fn-gold); border: 1px solid var(--fn-gold); border-radius: 999px; padding: 0.28rem 0.85rem; opacity: 0.9; }
+  .beat { width: 9px; height: 9px; border-radius: 50%; background: ${engineUp ? "var(--fn-win)" : "var(--fn-live)"}; box-shadow: 0 0 8px ${engineUp ? "var(--fn-win)" : "var(--fn-live)"}; }
+  .skin-btn { background: none; border: 1px solid var(--fn-line); color: var(--fn-ink); border-radius: 8px; padding: 0.25rem 0.6rem; cursor: pointer; font-size: 0.95rem; }
+  .fn-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: calc(100vh - 58px); }
+  .fn-side-col { background: var(--fn-side); border-right: 1px solid var(--fn-line); padding: 1.2rem 0.95rem; }
+  .side-h { font-size: 0.6rem; letter-spacing: 0.26em; color: var(--fn-dim); margin: 1.4rem 0 0.6rem; font-weight: 600; }
+  .side-h:first-child { margin-top: 0; }
+  .card-folder { font-size: 0.62rem; letter-spacing: 0.12em; color: var(--fn-faint); margin: 0.7rem 0 0.25rem; }
+  .card-entry { display: block; color: var(--fn-dim); padding: 0.5rem 0.7rem; font-size: 0.85rem; border-left: 3px solid transparent; }
+  .card-entry:hover { color: var(--fn-ink); text-decoration: none; }
+  .card-entry.on { color: var(--fn-ink); background: var(--fn-panel); border-left-color: var(--fn-gold); box-shadow: var(--fn-shadow); }
+  .card-counts { display: block; font-size: 0.64rem; color: var(--fn-faint); letter-spacing: 0.08em; font-family: ui-monospace, monospace; }
+  .card-counts.has-live { color: var(--fn-live); }
+  .quiet-cards { margin: 0.2rem 0 0.2rem 0.7rem; }
+  .quiet-cards summary { font-size: 0.68rem; color: var(--fn-faint); cursor: pointer; padding: 0.2rem 0; }
+  .fighter-card { background: var(--fn-panel); border: 1px solid var(--fn-line); padding: 0.65rem 0.75rem; margin-bottom: 0.55rem; box-shadow: var(--fn-shadow); }
+  .f-head { display: flex; align-items: center; gap: 0.45rem; font-size: 0.84rem; }
+  .f-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fn-faint); flex: none; }
+  .f-load { margin-left: auto; font-size: 0.62rem; color: var(--fn-dim); font-family: ui-monospace, monospace; }
+  .f-model { font-size: 0.64rem; color: var(--fn-gold); font-family: ui-monospace, monospace; margin-top: 0.25rem; }
+  .f-busy { font-size: 0.66rem; margin-top: 0.2rem; }
+  .f-det { font-size: 0.64rem; color: var(--fn-dim); margin-top: 0.25rem; min-height: 1em; }
+  .f-ping { margin-top: 0.45rem; font-size: 0.6rem; letter-spacing: 0.12em; background: none; border: 1px solid var(--fn-gold); color: var(--fn-gold); padding: 0.18rem 0.55rem; cursor: pointer; }
+  .fn-main { padding: 1.4rem 1.8rem; min-width: 0; max-width: 1160px; }
+  .poster { text-align: center; margin-bottom: 0.9rem; }
+  .poster .ev { font-size: 0.62rem; letter-spacing: 0.32em; color: var(--fn-live); font-weight: 700; }
+  .poster h1 { font-size: clamp(1.5rem, 3.4vw, 2.3rem); letter-spacing: 0.05em; text-transform: uppercase; margin: 0.25rem 0; text-wrap: balance; }
+  .poster .sub { color: var(--fn-dim); font-size: 0.82rem; font-style: italic; }
+  .tally { display: flex; justify-content: center; gap: 2.2rem; margin: 1rem 0 0.4rem; }
+  .tally div { text-align: center; }
+  .tally b { display: block; font-size: 1.45rem; color: var(--fn-gold); font-variant-numeric: tabular-nums; font-family: var(--fn-display); }
+  .tally span { font-size: 0.58rem; letter-spacing: 0.22em; color: var(--fn-dim); }
+  .signals { display: flex; justify-content: center; align-items: center; gap: 0.7rem; margin: 0.7rem 0 1.3rem; flex-wrap: wrap; }
+  .fn-clock { font-family: ui-monospace, monospace; color: var(--fn-gold); font-size: 1rem; border: 1px solid var(--fn-gold); border-radius: 8px; padding: 0.25rem 0.85rem; background: var(--fn-panel); }
+  .fn-clock small { display: block; font-size: 0.56rem; letter-spacing: 0.2em; color: var(--fn-dim); }
+  .fn-clock em { font-style: normal; font-size: 0.62rem; color: var(--fn-dim); }
+  .sig { display: flex; align-items: center; gap: 0.4rem; font-family: ui-monospace, monospace; font-size: 0.64rem; color: var(--fn-dim); border: 1px solid var(--fn-line); border-radius: 7px; padding: 0.3rem 0.7rem; background: var(--fn-panel); }
+  .sig i { width: 8px; height: 8px; border-radius: 50%; }
+  .fn-panel { background: var(--fn-panel); border: 1px solid var(--fn-line); padding: 1rem 1.2rem; margin-bottom: 1.2rem; box-shadow: var(--fn-shadow); }
+  .fn-panel-title { font-size: 0.62rem; letter-spacing: 0.3em; color: var(--fn-gold); margin: 0 0 0.7rem; font-family: var(--fn-display); }
+  .floor { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.9rem; }
+  @media (max-width: 980px) { .floor { grid-template-columns: repeat(2, minmax(0, 1fr)); } .fn-layout { grid-template-columns: 1fr; } .fn-side-col { border-right: none; border-bottom: 1px solid var(--fn-line); } }
+  .floor-col h6 { font-size: 0.6rem; letter-spacing: 0.2em; color: var(--fn-dim); margin: 0 0 0.55rem; display: flex; justify-content: space-between; }
+  .col-ring h6 { color: var(--fn-live); } .col-judges h6 { color: var(--fn-gold); } .col-books h6 { color: var(--fn-win); }
+  .floor-empty { color: var(--fn-faint); text-align: center; padding: 1rem 0; }
+  .bout { background: var(--fn-bg); border: 1px solid var(--fn-line); border-top: 3px solid var(--fn-faint); padding: 0.7rem 0.8rem; margin-bottom: 0.7rem; font-size: 0.82rem; }
+  .bout-ring { border-top-color: var(--fn-live); }
+  .bout-judges { border-top-color: var(--fn-gold); }
+  .bout-books { border-top-color: var(--fn-win); opacity: 0.85; }
+  .bout-failed { border-color: var(--fn-live); }
+  .bout-head { display: flex; align-items: baseline; gap: 0.45rem; flex-wrap: wrap; }
+  .bout-repo { font-size: 0.6rem; letter-spacing: 0.1em; color: var(--fn-faint); font-family: ui-monospace, monospace; }
+  .bout-title { font-weight: 600; flex: 1 1 100%; line-height: 1.35; }
+  .bout-status { font-size: 0.74rem; margin-top: 0.25rem; }
+  .log-row { display: grid; grid-template-columns: 52px 1fr; gap: 0.7rem; font-size: 0.78rem; padding: 0.3rem 0; border-bottom: 1px dashed var(--fn-line); }
+  .log-row:last-child { border-bottom: none; }
+  .log-row time { font-family: ui-monospace, monospace; color: var(--fn-dim); font-size: 0.68rem; padding-top: 1px; }
+  .lk-win { color: var(--fn-win); } .lk-live { color: var(--fn-live); } .lk-gold { color: var(--fn-gold); }
+  .log-who { color: var(--fn-dim); }
+  .log-where { color: var(--fn-faint); font-family: ui-monospace, monospace; font-size: 0.68rem; }
+  .corner-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.2rem; }
+  /* legacy blocks, recolored by tokens */
+  .card { border: 1px solid var(--fn-line); background: var(--fn-panel); padding: 1rem 1.2rem; margin: 0; box-shadow: var(--fn-shadow); }
+  .card h2 { font-size: 1rem; margin: 0 0 0.4rem; font-family: var(--fn-display); }
+  .attention { border-color: var(--fn-gold); }
+  .attention ul { margin: 0.4rem 0 0; padding-left: 1.1rem; } .attention li { margin: 0.45rem 0; font-size: 0.85rem; }
+  .notice { border: 1px solid var(--fn-win); background: transparent; border-radius: 8px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-size: 0.88rem; }
+  .trail { font-size: 0.74rem; margin-top: 0.3rem; }
   .trail-sep { opacity: 0.5; margin: 0 0.2rem; }
-  .trail-branch { opacity: 0.5; font-family: ui-monospace, monospace; font-size: 0.74rem; }
+  .trail-branch { opacity: 0.55; font-family: ui-monospace, monospace; font-size: 0.68rem; }
   .trail-pending { opacity: 0.55; font-style: italic; }
-  .checklist { margin: 0.45rem 0 0.2rem 1.35rem; border-left: 3px solid #d2992255; padding: 0.3rem 0 0.3rem 0.8rem; }
-  .checklist-head { font-size: 0.83rem; font-weight: 600; }
-  .checklist ul { list-style: none; margin: 0.3rem 0 0; padding: 0; }
-  .checklist li { padding: 0.2rem 0; border-top: none; font-size: 0.83rem; }
-  .checklist li.addressed { opacity: 0.65; }
-  .point-meta { opacity: 0.6; font-size: 0.74rem; }
-  .branch-line { font-size: 0.8rem; margin: 0.25rem 0 0 1.35rem; }
-  .fresh-ok { color: #2da44e; }
-  .fresh-warn { color: #d29922; }
-  .workloads { margin: 0 0 0.6rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
-  .workload { font-size: 0.78rem; padding: 2px 10px; border-radius: 999px; border: 1px solid #8885; }
-  .workload-over { color: #cf222e; border-color: #cf222e88; background: #cf222e12; }
+  .pickup-warn { font-size: 0.74rem; color: var(--fn-gold); margin-top: 0.3rem; }
+  .branch-line { font-size: 0.74rem; margin-top: 0.25rem; }
+  .fresh-ok { color: var(--fn-win); } .fresh-warn { color: var(--fn-gold); }
+  .checklist { margin-top: 0.4rem; border-left: 3px solid var(--fn-gold); padding: 0.2rem 0 0.2rem 0.7rem; }
+  .checklist-head { font-size: 0.74rem; font-weight: 600; }
+  .checklist ul { list-style: none; margin: 0.25rem 0 0; padding: 0; }
+  .checklist li { padding: 0.15rem 0; font-size: 0.74rem; }
+  .checklist li.addressed { opacity: 0.6; }
+  .point-meta { opacity: 0.6; font-size: 0.68rem; }
+  .threads { margin-top: 0.4rem; border-left: 3px solid var(--fn-gold); padding: 0.2rem 0 0.2rem 0.7rem; }
+  .threads-head { font-size: 0.74rem; font-weight: 600; }
+  .threads ul { list-style: none; margin: 0.25rem 0 0; padding: 0; }
+  .threads li { padding: 0.2rem 0; font-size: 0.74rem; }
+  .thread-snippet { font-size: 0.74rem; } .thread-meta { font-size: 0.68rem; opacity: 0.75; }
+  .thread-meta .waiting { color: var(--fn-gold); } .resolved-ok { color: var(--fn-win); }
+  .ci { font-size: 0.68rem; padding: 1px 7px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+  .ci-green { color: var(--fn-win); border-color: var(--fn-win); }
+  .ci-red { color: var(--fn-live); border-color: var(--fn-live); }
+  .ci-pending { color: var(--fn-gold); border-color: var(--fn-gold); }
+  .ci-none { color: var(--fn-dim); border-color: var(--fn-line); }
+  .accept { margin-top: 0.5rem; border: 1px solid var(--fn-win); padding: 0.6rem 0.8rem; }
+  .plain-summary { font-size: 0.8rem; margin-bottom: 0.45rem; }
+  .accept-btn { font: inherit; font-weight: 600; padding: 0.4rem 1rem; border: none; background: var(--fn-win); color: #fff; cursor: pointer; }
+  .accept-btn[disabled] { background: var(--fn-faint); cursor: not-allowed; }
+  .accept-alt { font-size: 0.74rem; margin-left: 0.7rem; }
   .ctl { display: inline; margin-left: auto; }
-  .stop-btn { background: transparent; color: #cf222e; border: 1px solid #cf222e88; padding: 0.15rem 0.7rem; font-size: 0.78rem; }
-  .relaunch-btn { background: transparent; color: #2da44e; border: 1px solid #2da44e88; padding: 0.15rem 0.7rem; font-size: 0.78rem; }
-  .ci { font-size: 0.76rem; padding: 1px 8px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
-  .ci-green { color: #2da44e; border-color: #2da44e66; background: #2da44e14; }
-  .ci-red { color: #cf222e; border-color: #cf222e66; background: #cf222e14; }
-  .ci-pending { color: #d4a72c; border-color: #d4a72c66; background: #d4a72c14; }
-  .ci-none { color: #888; border-color: #8886; }
-  .accept { margin: 0.6rem 0 0.2rem 1.35rem; border: 1px solid #2da44e55; background: #2da44e0d; border-radius: 10px; padding: 0.7rem 0.9rem; }
-  .plain-summary { font-size: 0.9rem; margin-bottom: 0.55rem; }
-  .accept-btn { margin: 0; padding: 0.45rem 1.2rem; }
-  .accept-btn[disabled] { background: #8886; cursor: not-allowed; }
-  .accept-alt { font-size: 0.8rem; margin-left: 0.8rem; }
-  .threads { margin: 0.45rem 0 0.2rem 1.35rem; border-left: 3px solid #8957e555; padding: 0.3rem 0 0.3rem 0.8rem; }
-  .threads-head { font-size: 0.83rem; font-weight: 600; }
-  .threads ul { list-style: none; margin: 0.3rem 0 0; padding: 0; }
-  .threads li { padding: 0.3rem 0; border-top: none; }
-  .thread-snippet { font-size: 0.83rem; }
-  .thread-meta { font-size: 0.76rem; opacity: 0.7; }
-  .thread-meta .waiting { color: #d29922; }
-  .resolved-ok { color: #2da44e; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; position: relative; top: 1px; }
-  .item-title { font-weight: 600; flex: 1 1 280px; }
-  .item-status { font-size: 0.88rem; flex: 1 1 240px; }
-  .card-foot { margin: 0.8rem 0 0; font-size: 0.85rem; }
-  a { color: #316dca; text-decoration: none; } a:hover { text-decoration: underline; }
+  .stop-btn { background: transparent; color: var(--fn-live); border: 1px solid var(--fn-live); padding: 0.1rem 0.6rem; font-size: 0.68rem; cursor: pointer; }
+  .relaunch-btn { background: transparent; color: var(--fn-win); border: 1px solid var(--fn-win); padding: 0.1rem 0.6rem; font-size: 0.68rem; cursor: pointer; }
   .action { font-weight: 600; }
-  form label { display: block; font-weight: 600; margin: 0.8rem 0 0.25rem; }
-  textarea, select { width: 100%; box-sizing: border-box; font: inherit; padding: 0.55rem; border-radius: 8px; border: 1px solid #8886; }
-  textarea { min-height: 110px; resize: vertical; }
-  button { margin-top: 0.9rem; font: inherit; font-weight: 600; padding: 0.55rem 1.4rem; border-radius: 8px; border: none; background: #2da44e; color: white; cursor: pointer; }
-  button:hover { filter: brightness(1.08); }
-  .notice { border: 1px solid #2da44e88; background: #2da44e15; border-radius: 8px; padding: 0.7rem 1rem; }
-  .coach-panel .coach-current { margin: 0.3rem 0 0.7rem; }
+  form label { display: block; font-weight: 600; margin: 0.7rem 0 0.25rem; font-size: 0.84rem; }
+  textarea, select { width: 100%; font: inherit; padding: 0.5rem; border-radius: 8px; border: 1px solid var(--fn-line); background: var(--fn-bg); color: var(--fn-ink); }
+  textarea { min-height: 96px; resize: vertical; }
+  button { font: inherit; }
+  .card form > button, .coach-form button { margin-top: 0.8rem; font-weight: 600; padding: 0.5rem 1.2rem; border-radius: 8px; border: none; background: var(--fn-gold); color: var(--fn-bg); cursor: pointer; }
+  .coach-panel .coach-current { margin: 0.3rem 0 0.6rem; font-size: 0.88rem; }
   .coach-form { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-  .coach-form select { width: auto; flex: 1 1 220px; }
+  .coach-form select { width: auto; flex: 1 1 200px; }
   .coach-form button { margin: 0; }
-  .cost-panel .cost-total { font-size: 1rem; margin: 0.3rem 0 0.5rem; }
-  .cost-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
-  .cost-table th, .cost-table td { padding: 0.3rem 0.6rem; text-align: left; border-bottom: 1px solid #8882; }
-  .cost-table .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .trust-panel .trust-badge { display: inline-block; font-weight: 700; font-size: 1rem; border: 2px solid; border-radius: 8px; padding: 0.25rem 0.8rem; margin: 0.3rem 0 0.4rem; }
-  .trust-detail { font-size: 0.88rem; margin: 0 0 0.6rem; }
-  .trust-ladder { display: flex; flex-direction: column; gap: 0.35rem; }
-  .trust-step { border: 1px solid #8883; border-radius: 8px; padding: 0.35rem 0.7rem; opacity: 0.55; }
-  .trust-step.trust-active { opacity: 1; border-width: 2px; background: #8880; }
-  details { margin-top: 2.5rem; font-size: 0.85rem; opacity: 0.75; }
-  footer { margin-top: 1.5rem; font-size: 0.78rem; opacity: 0.5; }
+  .cost-panel p { font-size: 0.85rem; margin: 0.3rem 0; }
+  .stopped-note { margin-top: 0.8rem; font-size: 0.8rem; color: var(--fn-dim); }
+  .stopped-note summary { cursor: pointer; }
+  details.tech { margin-top: 2rem; font-size: 0.78rem; opacity: 0.7; }
+  footer { margin-top: 1.4rem; font-size: 0.72rem; opacity: 0.5; }
+  .copy-btn { font-size: 0.8rem; background: none; border: 1px solid var(--fn-line); color: var(--fn-ink); border-radius: 8px; padding: 0.4rem 0.9rem; cursor: pointer; }
 </style>
 </head>
 <body>
-  <h1>🤖 My AI team</h1>
-  <p class="subtitle">${agentName(config.agents[0] ?? "")}${config.agents.length > 1 ? " and " + config.agents.slice(1).map(agentName).join(", ") : ""} do the work · a coach checks everything · you approve the results</p>
-  ${notice ? `<p class="notice">${esc(notice)}</p>` : ""}
-  ${ringPanel(store)}
-  ${attentionHtml}
-  ${coachPanel(store)}
-  ${costHtml}
-  ${projects}
-  <section class="card">
-    <h2>🚀 Request new work</h2>
-    <form method="post" action="/dashboard/new-work">
-      <label for="repo">Project</label>
-      <select name="repo" id="repo" required>${repoOptions}</select>
-      <label for="description">What do you want done?</label>
-      <textarea name="description" id="description" required placeholder="Describe it like you would to a contractor. Example: Add a contact form to the website that emails me when someone fills it in."></textarea>
-      <button type="submit">Send to the team</button>
-    </form>
-    <p class="card-foot">The coach will break this into tasks and hand them to the fighters. Items will appear above within a few minutes.</p>
-  </section>
-  ${handoffPanel(store)}
-  <details>
-    <summary>Technical details</summary>
-    <ul>${jobs.map((j) => `<li>job ${j.id} · ${esc(j.type)} · ${esc(j.repo)}#${j.issue} · ${esc(j.status)}${j.error ? ` · ${esc(j.error.slice(0, 140))}` : ""}</li>`).join("")}</ul>
-  </details>
-  <footer>This page refreshes itself every minute · ${new Date().toLocaleString()}</footer>
+  <nav class="fn-nav">
+    <span class="fn-wordmark">FOREMAN</span>
+    <a class="navlink" href="/dashboard">THE CARD</a>
+    <a class="navlink" href="#flow">THE FLOW</a>
+    <a class="navlink" href="#needs-you">JUDGES&rsquo; TABLE</a>
+    <a class="navlink" href="#corner">THE CORNER</a>
+    <span class="right">
+      ${bell > 0 ? `<a class="bell" href="#needs-you" title="${bell} decision${bell > 1 ? "s" : ""} await you">🔔<b>${bell}</b></a>` : `<span class="bell" title="nothing awaits you">🔔</span>`}
+      <span class="coach-pill">In the corner: ${esc(coach.label.length > 30 ? coach.label.slice(0, 29) + "…" : coach.label)}</span>
+      <span class="beat" title="${engineUp ? "engine live" : "engine silent"}"></span>
+      <button class="skin-btn" id="skinBtn" onclick="(function(b){var h=document.documentElement;var s=h.dataset.skin==='dark'?'light':'dark';h.dataset.skin=s;try{localStorage.setItem('foreman-skin',s);}catch(e){};b.textContent=s==='dark'?'☀':'🌙';})(this)" title="switch skin">☀</button>
+    </span>
+  </nav>
+  <script>document.getElementById('skinBtn').textContent = document.documentElement.dataset.skin === 'dark' ? '☀' : '🌙';</script>
+  <div class="fn-layout">
+    <aside class="fn-side-col">
+      ${fightCards(allTasks, repos, selectedRepo)}
+      ${rosterPanel(allTasks, store)}
+    </aside>
+    <main class="fn-main">
+      ${notice ? `<p class="notice">${esc(notice)}</p>` : ""}
+      <div class="poster">
+        <div class="ev">★ ${selectedRepo ? "MAIN EVENT" : "TONIGHT'S CARD"} ★</div>
+        <h1>${esc(scopeLabel)}</h1>
+        <div class="sub">${tally.won + tally.live + tally.you + tally.card === 0 ? "a quiet night — send new work from The Corner below" : `${scoped.filter((t) => t.status !== "stopped").length} bouts${tier ? ` · trust ${esc(tier)}` : ""}`}</div>
+      </div>
+      <div class="tally">
+        <div><b>${tally.won}</b><span>WON</span></div>
+        <div><b>${tally.live}</b><span>IN THE RING</span></div>
+        <div><b>${tally.you}</b><span>YOUR CORNER</span></div>
+        <div><b>${tally.card}</b><span>ON THE CARD</span></div>
+      </div>
+      <div class="signals">
+        ${clock}
+        <span class="sig"><i style="background:${engineUp ? "var(--fn-win)" : "var(--fn-live)"}; box-shadow:0 0 6px ${engineUp ? "var(--fn-win)" : "var(--fn-live)"}"></i>ENGINE</span>
+        <span class="sig"><i style="background:var(--fn-${ciState})"></i>${esc(ciLabel)}</span>
+        ${bell > 0 ? `<span class="sig" style="color:var(--fn-gold); border-color:var(--fn-gold)"><i style="background:var(--fn-gold); box-shadow:0 0 6px var(--fn-gold)"></i>${bell} AWAIT${bell === 1 ? "S" : ""} YOU</span>` : ""}
+      </div>
+      <div id="flow">${ringPanel(store)}</div>
+      ${attention.length
+        ? `<section class="card attention fn-panel" id="needs-you"><div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap"><h4 class="fn-panel-title" style="margin:0">🔔 JUDGES&rsquo; TABLE — DECISIONS AWAITED</h4><form method="post" action="/dashboard/archive-stale" style="margin-left:auto" onsubmit="return confirm('Archive everything untouched for 7+ days? Each bout flips to Stopped and can be relaunched.')"><button type="submit" style="margin:0;padding:0.25rem 0.8rem;font-size:0.72rem;background:transparent;color:var(--fn-gold);border:1px solid var(--fn-gold);cursor:pointer">🧹 Archive stale</button></form></div><ul>${attention.join("")}</ul></section>`
+        : `<section class="fn-panel" id="needs-you"><h4 class="fn-panel-title" style="color:var(--fn-win)">✓ JUDGES&rsquo; TABLE — CLEAR</h4><p style="margin:0;font-size:0.85rem;color:var(--fn-dim)">Nothing awaits your decision right now.</p></section>`}
+      ${floorPanel(scoped, store, threadMap, !selectedRepo)}
+      ${refereeLog(store, scopeRepos)}
+      <div class="corner-grid" id="corner">
+        <section class="card">
+          <h2>🚀 Send new work</h2>
+          <form method="post" action="/dashboard/new-work">
+            <label for="repo">Fight card</label>
+            <select name="repo" id="repo" required>${repoOptions}</select>
+            <label for="description">What do you want done?</label>
+            <textarea name="description" id="description" required placeholder="Describe it like you would to a contractor."></textarea>
+            <button type="submit">Send to the team</button>
+          </form>
+          <p class="point-meta">The coach breaks it into bouts and hands them to the fighters.</p>
+        </section>
+        ${coachPanel(store)}
+        <section class="card cost-panel">
+          <h2>💰 Cost</h2>
+          <p>${esc(cost.summary)}</p>
+          <p class="point-meta">${cost.remainingUsd !== null ? `Remaining budget: $${cost.remainingUsd.toFixed(2)} · used ${cost.usedPct}%` : "No budget ceiling configured."}</p>
+        </section>
+        ${handoffPanel(store)}
+      </div>
+      <details class="tech">
+        <summary>Referee&rsquo;s book — recent engine jobs</summary>
+        <ul>${jobs.map((j) => `<li>job ${j.id} · ${esc(j.type)} · ${esc(j.repo)}#${j.issue} · ${esc(j.status)}${j.error ? ` · ${esc(j.error.slice(0, 140))}` : ""}</li>`).join("")}</ul>
+      </details>
+      <footer>Refreshes itself · flow every 8s, page every 2 min · ${new Date().toLocaleString()}</footer>
+    </main>
+  </div>
 </body>
 </html>`;
 }
+

@@ -15,6 +15,7 @@ import { startJunior } from "./junior/runner.js";
 import { startWorker } from "./manager/worker.js";
 import { isValidCoachKey, setCoachBackend } from "./manager/coach-backends.js";
 import { renderRingSvg } from "./ringmap.js";
+import { pingFighter } from "./fighters.js";
 import { Store } from "./state/db.js";
 import { recoverFromCrash, rebuildCacheFromGitHub } from "./state/sync.js";
 
@@ -248,6 +249,21 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
         return true;
       }
 
+      // Honest availability check for a fighter — the roster's PING button.
+      if (req.method === "POST" && path.startsWith("/api/ping/")) {
+        const agent = decodeURIComponent(path.slice("/api/ping/".length));
+        pingFighter(agent)
+          .then((result) => {
+            res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+            res.end(JSON.stringify({ agent, at: new Date().toISOString(), ...result }));
+          })
+          .catch((e) => {
+            res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ agent, pingable: true, ok: false, detail: String(e).slice(0, 120) }));
+          });
+        return true;
+      }
+
       // The Ring Map fragment — polled by the dashboard every 8s for a live view.
       if (req.method === "GET" && path === "/api/ring") {
         res.writeHead(200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "no-store" });
@@ -317,13 +333,14 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
               : url.searchParams.get("err")
                 ? `That didn't work: ${url.searchParams.get("err")}`
                 : undefined;
+        const selectedCard = url.searchParams.get("card");
         Promise.all([
           installedRepos().catch(() => [] as RepoOption[]),
           liveState().catch(() => ({ map: {} as ThreadMap, branches: {} as RepoBranches })),
         ]).then(async ([repos, live]) => {
           const trustTiers = await trustTiersFor(repos).catch(() => ({} as Record<string, string>));
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          res.end(renderDashboard(store, repos, notice, live.map, live.branches, trustTiers));
+          res.end(renderDashboard(store, repos, notice, live.map, live.branches, trustTiers, selectedCard));
         });
         return true;
       }

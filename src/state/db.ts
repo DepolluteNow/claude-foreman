@@ -237,6 +237,13 @@ export class Store {
       .get(repo, issue, pr ?? -1) as CommentRow | undefined;
   }
 
+  /** Latest comments for a repo, newest first — feeds the referee's log. */
+  recentComments(repo: string, limit = 12): CommentRow[] {
+    return this.db
+      .prepare(`SELECT * FROM comments WHERE repo = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(repo, limit) as CommentRow[];
+  }
+
   hasComments(repo: string, issue: number): boolean {
     return !!this.db.prepare(`SELECT 1 FROM comments WHERE repo = ? AND issue = ? LIMIT 1`).get(repo, issue);
   }
