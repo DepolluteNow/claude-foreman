@@ -7,6 +7,7 @@ import type { TrustTier } from "./referee/readiness.js";
 import { COACH_BACKENDS, ENV_DEFAULT_KEY, resolveCoachBackend } from "./manager/coach-backends.js";
 import { ringPanel } from "./ringmap.js";
 import { rosterFor } from "./fighters.js";
+import { getJuniorEffort, getJuniorModel, JUNIOR_EFFORTS, JUNIOR_MODELS, juniorModelLabel } from "./junior/settings.js";
 
 const NO_THREADS: ThreadOverview = { open: [], resolvedCount: 0, total: 0 };
 
@@ -54,6 +55,23 @@ export function pickupVerdict(t: TaskRow, last: CommentRow | undefined, now = Da
 export interface RepoOption {
   fullName: string;
   installationId: number;
+}
+
+/** One issue or PR as fetched live from GitHub for the "On GitHub" panel. */
+export interface GhItem {
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  state: string; // open | closed | merged
+}
+
+export interface GhActivity {
+  openIssues: GhItem[];
+  closedIssues: GhItem[];
+  openPrs: GhItem[];
+  closedPrs: GhItem[];
+  fetchedAt: number;
 }
 
 function esc(s: string | null | undefined): string {
@@ -665,7 +683,9 @@ function refereeLog(store: Store, repoNames: string[]): string {
     const when = new Date(c.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const kind = c.msg_type ? c.msg_type.toUpperCase().replace(/-/g, " ") : "COMMENT";
     const kindCls = /approval|merged/.test(c.msg_type ?? "") ? "lk-win" : /revision|timeout|reassignment/.test(c.msg_type ?? "") ? "lk-live" : "lk-gold";
-    return `<div class="log-row"><time>${when}</time><div><b class="${kindCls}">${esc(kind)}</b> <span class="log-who">${esc(displayAuthor(c))}</span> — ${esc(c.snippet.slice(0, 110))}${c.snippet.length > 110 ? "…" : ""} <span class="log-where">#${c.issue}</span></div></div>`;
+    const ghUrl = c.url ?? `https://github.com/${c.repo}/issues/${c.issue}`;
+    const full = c.body && c.body.length > c.snippet.length ? c.body : c.snippet;
+    return `<details class="log-row"><summary><time>${when}</time><span><b class="${kindCls}">${esc(kind)}</b> <span class="log-who">${esc(displayAuthor(c))}</span> — ${esc(c.snippet.slice(0, 110))}${c.snippet.length > 110 ? "…" : ""} <span class="log-where">#${c.issue}</span></span></summary><div class="log-full">${esc(full)}</div><a class="log-gh" href="${esc(ghUrl)}" target="_blank" rel="noopener">View on GitHub ↗</a></details>`;
   };
   return `<section class="fn-panel"><h4 class="fn-panel-title">REFEREE&rsquo;S LOG</h4>${rows.map(line).join("")}</section>`;
 }
@@ -679,12 +699,22 @@ function rosterPanel(tasks: TaskRow[], store: Store): string {
     const rl = store.agentStatus(f.agent).state === "rate_limited";
     const busyLine = rl ? `<div class="f-busy" style="color:var(--fn-live)">⛔ rate-limited</div>`
       : mine > 0 ? `<div class="f-busy" style="color:var(--fn-live)">● in the ring · ${mine}</div>` : "";
+    const isJunior = f.agent === config.juniorAgent;
+    const modelLine = isJunior ? juniorModelLabel(store) : f.model;
+    const juniorForm = isJunior
+      ? `<form method="post" action="/dashboard/set-junior" class="f-config">
+          <select name="model" title="model for the next session">${JUNIOR_MODELS.map((m) => `<option value="${esc(m.key)}"${m.key === getJuniorModel(store) ? " selected" : ""}>${esc(m.label)}</option>`).join("")}</select>
+          <select name="effort" title="effort ceiling for the next session">${JUNIOR_EFFORTS.map((e) => `<option value="${esc(e.key)}"${e.key === getJuniorEffort(store) ? " selected" : ""}>${esc(e.label)}</option>`).join("")}</select>
+          <button type="submit">SET</button>
+        </form>`
+      : "";
     return `<div class="fighter-card" data-agent="${esc(f.agent)}" data-pingable="${f.ping ? 1 : 0}">
       <div class="f-head"><i class="f-dot"></i><b>${esc(f.label)}</b><span class="f-load">${mine}/${limit}</span></div>
-      <div class="f-model">${esc(f.model)}</div>
+      <div class="f-model">${esc(modelLine)}</div>
       ${busyLine}
       <div class="f-det">${f.ping ? "pinging…" : "not pingable (no CLI/API)"}</div>
       ${f.ping ? `<button type="button" class="f-ping" onclick="window.pingFighter('${esc(f.agent)}')">PING</button>` : ""}
+      ${juniorForm}
     </div>`;
   }).join("");
   return `<h5 class="side-h">THE ROSTER</h5>${cards}
@@ -741,6 +771,38 @@ function fightCards(tasks: TaskRow[], repos: RepoOption[], selectedRepo: string 
   return `<h5 class="side-h">FIGHT CARDS</h5>${all}${folders}`;
 }
 
+
+/** ON GITHUB — live open/closed issues and PRs for the scoped fight card(s). */
+function ghPanel(activity: Record<string, GhActivity>, scopeRepos: string[]): string {
+  const repos = scopeRepos.filter((r) => activity[r]);
+  if (repos.length === 0) return "";
+  const item = (repo: string, i: GhItem, isPr: boolean) => {
+    const dot = i.state === "merged" ? "var(--fn-gold)" : i.state === "open" ? "var(--fn-win)" : "var(--fn-faint)";
+    return `<li><i style="background:${dot}"></i><a href="${esc(i.url)}" target="_blank" rel="noopener">#${i.number} ${esc(i.title.slice(0, 80))}${i.title.length > 80 ? "…" : ""}</a><span class="gh-who">${esc(i.author)}</span></li>`;
+  };
+  const block = (title: string, rows: string[], openByDefault: boolean) =>
+    rows.length === 0
+      ? ""
+      : `<details${openByDefault ? " open" : ""}><summary>${title} · ${rows.length}</summary><ul class="gh-list">${rows.join("")}</ul></details>`;
+  const cols = repos.map((r) => {
+    const a = activity[r];
+    return `<div class="gh-col">
+      ${repos.length > 1 ? `<div class="gh-repo">${esc(projectName(r))}</div>` : ""}
+      <div class="gh-half"><div class="gh-h">ISSUES</div>
+        ${block("Open", a.openIssues.map((i) => item(r, i, false)), true)}
+        ${block("Recently closed", a.closedIssues.map((i) => item(r, i, false)), false)}
+        ${a.openIssues.length + a.closedIssues.length === 0 ? `<p class="gh-empty">none</p>` : ""}
+      </div>
+      <div class="gh-half"><div class="gh-h">PULL REQUESTS</div>
+        ${block("Open", a.openPrs.map((i) => item(r, i, true)), true)}
+        ${block("Recently closed", a.closedPrs.map((i) => item(r, i, true)), false)}
+        ${a.openPrs.length + a.closedPrs.length === 0 ? `<p class="gh-empty">none</p>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  return `<section class="fn-panel gh-panel"><h4 class="fn-panel-title">ON GITHUB — THE OFFICIAL RECORD</h4>${cols}</section>`;
+}
+
 export function renderDashboard(
   store: Store,
   repos: RepoOption[],
@@ -748,7 +810,8 @@ export function renderDashboard(
   threadMap: ThreadMap = {},
   repoBranches: RepoBranches = {},
   trustTiers: Record<string, string> = {},
-  selectedRepo: string | null = null
+  selectedRepo: string | null = null,
+  ghActivity: Record<string, GhActivity> = {}
 ): string {
   void repoBranches; // superseded by the roster in the Fight Night layout
   const allTasks = store.listTasks();
@@ -823,6 +886,27 @@ export function renderDashboard(
   .bell { position: relative; font-size: 1.05rem; color: inherit; }
   .bell b { position: absolute; top: -7px; right: -10px; background: var(--fn-live); color: #fff; font-size: 0.58rem; border-radius: 999px; padding: 1px 5px; font-family: sans-serif; }
   .coach-pill { font-size: 0.7rem; letter-spacing: 0.06em; color: var(--fn-gold); border: 1px solid var(--fn-gold); border-radius: 999px; padding: 0.28rem 0.85rem; opacity: 0.9; }
+  .coach-nav { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.7rem; letter-spacing: 0.06em; color: var(--fn-gold); border: 1px solid var(--fn-gold); border-radius: 999px; padding: 0.18rem 0.7rem; margin: 0; }
+  .coach-nav select { background: transparent; color: var(--fn-gold); border: none; font-size: 0.7rem; cursor: pointer; max-width: 220px; }
+  .coach-nav select option { background: var(--fn-panel); color: var(--fn-ink); }
+  .f-config { display: flex; gap: 0.3rem; margin: 0.45rem 0 0; }
+  .f-config select { flex: 1; min-width: 0; background: var(--fn-bg); color: var(--fn-ink); border: 1px solid var(--fn-line); font-size: 0.62rem; padding: 0.15rem 0.2rem; }
+  .f-config button { font-size: 0.6rem; letter-spacing: 0.1em; background: none; border: 1px solid var(--fn-gold); color: var(--fn-gold); padding: 0.15rem 0.45rem; cursor: pointer; margin: 0; }
+  .gh-panel .gh-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+  .gh-panel .gh-repo { grid-column: 1 / -1; font-size: 0.72rem; letter-spacing: 0.12em; color: var(--fn-gold); margin: 0.5rem 0 0.1rem; }
+  .gh-panel .gh-h { font-size: 0.66rem; letter-spacing: 0.16em; color: var(--fn-dim); margin: 0.4rem 0 0.3rem; }
+  .gh-panel details { margin: 0.2rem 0; }
+  .gh-panel summary { font-size: 0.72rem; color: var(--fn-dim); cursor: pointer; padding: 0.15rem 0; }
+  .gh-panel summary:hover { color: var(--fn-ink); }
+  .gh-list { list-style: none; margin: 0.2rem 0 0.4rem; padding: 0; }
+  .gh-list li { display: flex; align-items: baseline; gap: 0.45rem; font-size: 0.76rem; padding: 0.18rem 0; border-bottom: 1px dashed var(--fn-line); }
+  .gh-list li:last-child { border-bottom: none; }
+  .gh-list li i { width: 7px; height: 7px; border-radius: 50%; flex: none; position: relative; top: -1px; }
+  .gh-list li a { color: var(--fn-ink); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gh-list li a:hover { color: var(--fn-gold); }
+  .gh-who { margin-left: auto; font-size: 0.66rem; color: var(--fn-faint); flex: none; }
+  .gh-empty { font-size: 0.72rem; color: var(--fn-faint); margin: 0.2rem 0; }
+  @media (max-width: 900px) { .gh-panel .gh-col { grid-template-columns: 1fr; } }
   .beat { width: 9px; height: 9px; border-radius: 50%; background: ${engineUp ? "var(--fn-win)" : "var(--fn-live)"}; box-shadow: 0 0 8px ${engineUp ? "var(--fn-win)" : "var(--fn-live)"}; }
   .skin-btn { background: none; border: 1px solid var(--fn-line); color: var(--fn-ink); border-radius: 8px; padding: 0.25rem 0.6rem; cursor: pointer; font-size: 0.95rem; }
   .fn-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: calc(100vh - 58px); }
@@ -876,9 +960,15 @@ export function renderDashboard(
   .bout-repo { font-size: 0.6rem; letter-spacing: 0.1em; color: var(--fn-faint); font-family: ui-monospace, monospace; }
   .bout-title { font-weight: 600; flex: 1 1 100%; line-height: 1.35; }
   .bout-status { font-size: 0.74rem; margin-top: 0.25rem; }
-  .log-row { display: grid; grid-template-columns: 52px 1fr; gap: 0.7rem; font-size: 0.78rem; padding: 0.3rem 0; border-bottom: 1px dashed var(--fn-line); }
+  .log-row { font-size: 0.78rem; padding: 0.3rem 0; border-bottom: 1px dashed var(--fn-line); }
   .log-row:last-child { border-bottom: none; }
+  .log-row summary { display: grid; grid-template-columns: 52px 1fr; gap: 0.7rem; cursor: pointer; list-style: none; }
+  .log-row summary::-webkit-details-marker { display: none; }
+  .log-row summary:hover { color: var(--fn-ink); }
   .log-row time { font-family: ui-monospace, monospace; color: var(--fn-dim); font-size: 0.68rem; padding-top: 1px; }
+  .log-full { margin: 0.5rem 0 0.3rem 52px; padding: 0.6rem 0.8rem; background: color-mix(in srgb, var(--fn-panel) 60%, var(--fn-bg)); border-left: 2px solid var(--fn-gold); white-space: pre-wrap; word-break: break-word; font-size: 0.76rem; color: var(--fn-ink); max-height: 320px; overflow-y: auto; }
+  .log-gh { display: inline-block; margin: 0.25rem 0 0.2rem 52px; font-size: 0.68rem; letter-spacing: 0.08em; color: var(--fn-gold); text-decoration: none; }
+  .log-gh:hover { text-decoration: underline; }
   .lk-win { color: var(--fn-win); } .lk-live { color: var(--fn-live); } .lk-gold { color: var(--fn-gold); }
   .log-who { color: var(--fn-dim); }
   .log-where { color: var(--fn-faint); font-family: ui-monospace, monospace; font-size: 0.68rem; }
@@ -948,7 +1038,10 @@ export function renderDashboard(
     <a class="navlink" href="#corner">THE CORNER</a>
     <span class="right">
       ${bell > 0 ? `<a class="bell" href="#needs-you" title="${bell} decision${bell > 1 ? "s" : ""} await you">🔔<b>${bell}</b></a>` : `<span class="bell" title="nothing awaits you">🔔</span>`}
-      <span class="coach-pill">In the corner: ${esc(coach.label.length > 30 ? coach.label.slice(0, 29) + "…" : coach.label)}</span>
+      <form method="post" action="/dashboard/set-coach" class="coach-nav" title="who reviews the fighters' work — applies to the next dispatch">
+        <span>Coach:</span>
+        <select name="coach" onchange="this.form.submit()">${[{ key: ENV_DEFAULT_KEY, label: ".env default" }, ...COACH_BACKENDS].map((b) => `<option value="${esc(b.key)}"${b.key === coach.key ? " selected" : ""}>${esc(b.label)}</option>`).join("")}</select>
+      </form>
       <span class="beat" title="${engineUp ? "engine live" : "engine silent"}"></span>
       <button class="skin-btn" id="skinBtn" onclick="(function(b){var h=document.documentElement;var s=h.dataset.skin==='dark'?'light':'dark';h.dataset.skin=s;try{localStorage.setItem('foreman-skin',s);}catch(e){};b.textContent=s==='dark'?'☀':'🌙';})(this)" title="switch skin">☀</button>
     </span>
@@ -984,6 +1077,7 @@ export function renderDashboard(
         : `<section class="fn-panel" id="needs-you"><h4 class="fn-panel-title" style="color:var(--fn-win)">✓ JUDGES&rsquo; TABLE — CLEAR</h4><p style="margin:0;font-size:0.85rem;color:var(--fn-dim)">Nothing awaits your decision right now.</p></section>`}
       ${floorPanel(scoped, store, threadMap, !selectedRepo)}
       ${refereeLog(store, scopeRepos)}
+      ${ghPanel(ghActivity, scopeRepos)}
       <div class="corner-grid" id="corner">
         <section class="card">
           <h2>🚀 Send new work</h2>

@@ -48,6 +48,8 @@ describe("pickupVerdict", () => {
       msg_type: "revision-request",
       msg_from: "manager",
       created_at: NOW - 45 * MIN,
+      body: null,
+      url: null,
     };
     expect(pickupVerdict(task({ status: "changes_requested" }), last, NOW)).toMatch(/hasn't responded/);
   });
@@ -61,6 +63,8 @@ describe("pickupVerdict", () => {
       msg_type: "progress",
       msg_from: "antigravity",
       created_at: NOW - 5 * MIN,
+      body: null,
+      url: null,
     };
     expect(pickupVerdict(task({ status: "changes_requested" }), last, NOW)).toBeNull();
   });

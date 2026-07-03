@@ -1,6 +1,6 @@
 import type { ApplicationFunctionOptions, Probot } from "probot";
 import { config } from "./config.js";
-import { renderDashboard, threadKey, type RepoBranches, type RepoOption, type ThreadMap } from "./dashboard.js";
+import { renderDashboard, threadKey, type GhActivity, type GhItem, type RepoBranches, type RepoOption, type ThreadMap } from "./dashboard.js";
 import { renderHandoff } from "./handoff.js";
 import { LABEL_EPIC, taskBranch } from "./protocol/labels.js";
 import { agentBranches, branchStateFor, ciStateFor, prChangedFiles, unresolvedThreads } from "./threads.js";
@@ -14,6 +14,7 @@ import { sweepAutoMerge } from "./automerge.js";
 import { startJunior } from "./junior/runner.js";
 import { startWorker } from "./manager/worker.js";
 import { isValidCoachKey, setCoachBackend } from "./manager/coach-backends.js";
+import { setJuniorConfig } from "./junior/settings.js";
 import { renderRingSvg } from "./ringmap.js";
 import { pingFighter } from "./fighters.js";
 import { Store } from "./state/db.js";
@@ -99,6 +100,39 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
   // Live GitHub state per task (review threads + CI), cached briefly so
   // auto-refresh stays cheap
   let threadCache: { at: number; map: ThreadMap; branches: RepoBranches } = { at: 0, map: {}, branches: {} };
+
+  // Live issues/PRs for the "On GitHub" panel — cached 60s per repo so a
+  // dashboard refresh never hammers the API.
+  const ghCache = new Map<string, GhActivity>();
+  async function githubActivity(opt: RepoOption): Promise<GhActivity> {
+    const hit = ghCache.get(opt.fullName);
+    if (hit && Date.now() - hit.fetchedAt < 60_000) return hit;
+    const octokit = await probot.auth(opt.installationId);
+    const { owner, repo: name } = splitRepo(opt.fullName);
+    const asItem = (x: { number: number; title: string; user?: { login?: string } | null; html_url: string; state: string; merged_at?: string | null }): GhItem => ({
+      number: x.number,
+      title: x.title,
+      author: x.user?.login ?? "?",
+      url: x.html_url,
+      state: x.merged_at ? "merged" : x.state,
+    });
+    const [openIss, closedIss, openPr, closedPr] = await Promise.all([
+      octokit.rest.issues.listForRepo({ owner, repo: name, state: "open", per_page: 30 }),
+      octokit.rest.issues.listForRepo({ owner, repo: name, state: "closed", per_page: 15, sort: "updated", direction: "desc" }),
+      octokit.rest.pulls.list({ owner, repo: name, state: "open", per_page: 20 }),
+      octokit.rest.pulls.list({ owner, repo: name, state: "closed", per_page: 10, sort: "updated", direction: "desc" }),
+    ]);
+    const notPr = (x: { pull_request?: unknown }) => !x.pull_request;
+    const act: GhActivity = {
+      openIssues: openIss.data.filter(notPr).map(asItem),
+      closedIssues: closedIss.data.filter(notPr).map(asItem),
+      openPrs: openPr.data.map(asItem),
+      closedPrs: closedPr.data.map(asItem),
+      fetchedAt: Date.now(),
+    };
+    ghCache.set(opt.fullName, act);
+    return act;
+  }
   async function liveState(): Promise<{ map: ThreadMap; branches: RepoBranches }> {
     if (Date.now() - threadCache.at < 60_000) return threadCache;
     const map: ThreadMap = {};
@@ -322,6 +356,26 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
         return true;
       }
 
+      // Live-switch Claude-jr's model and effort — applies to its next session.
+      if (req.method === "POST" && path === "/dashboard/set-junior") {
+        (async () => {
+          let body = "";
+          for await (const chunk of req) {
+            body += chunk;
+            if (body.length > 65536) { res.writeHead(413, { "content-type": "text/plain" }); res.end("Request Entity Too Large"); return; }
+          }
+          const params = new URLSearchParams(body);
+          const ok = setJuniorConfig(store, (params.get("model") ?? "").trim(), (params.get("effort") ?? "").trim());
+          res.writeHead(303, { location: ok ? "/dashboard?notice=" + encodeURIComponent("Claude-jr updated — applies to its next session.") : "/dashboard?err=" + encodeURIComponent("unknown model or effort") });
+          res.end();
+        })().catch((e) => {
+          probot.log.error(`set-junior failed: ${e}`);
+          res.writeHead(303, { location: "/dashboard?err=" + encodeURIComponent("couldn't update Claude-jr — see server log") });
+          res.end();
+        });
+        return true;
+      }
+
       if (req.method === "GET" && (path === "/dashboard" || path === "/dashboard/")) {
         const url = new URL(req.url ?? "/", "http://localhost");
         const notice = url.searchParams.get("ok")
@@ -339,8 +393,16 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
           liveState().catch(() => ({ map: {} as ThreadMap, branches: {} as RepoBranches })),
         ]).then(async ([repos, live]) => {
           const trustTiers = await trustTiersFor(repos).catch(() => ({} as Record<string, string>));
+          // On GitHub panel: the selected card, or (on the all-cards view) the repos with live tasks, capped.
+          const activeRepos = selectedCard
+            ? repos.filter((r) => r.fullName === selectedCard)
+            : repos.filter((r) => store.listTasks().some((t) => t.repo === r.fullName && !["done", "stopped"].includes(t.status))).slice(0, 3);
+          const ghActivity: Record<string, GhActivity> = {};
+          await Promise.all(activeRepos.map(async (r) => {
+            try { ghActivity[r.fullName] = await githubActivity(r); } catch { /* panel simply omits this repo */ }
+          }));
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          res.end(renderDashboard(store, repos, notice, live.map, live.branches, trustTiers, selectedCard));
+          res.end(renderDashboard(store, repos, notice, live.map, live.branches, trustTiers, selectedCard, ghActivity));
         });
         return true;
       }

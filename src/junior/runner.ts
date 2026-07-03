@@ -13,6 +13,7 @@ import { serializeMessage } from "../protocol/messages.js";
 import type { Store, TaskRow } from "../state/db.js";
 import { replyToThread, resolveThread, unresolvedThreads } from "../threads.js";
 import { checkoutTaskBranch, commitAll, ensureWorkspace, headSha, push } from "./git.js";
+import { juniorGitEnv, resolveJuniorCmd } from "./settings.js";
 import { isTestsPassed, revisionPrompt, workPrompt, type JuniorReport } from "./prompts.js";
 import { assembleContextPacket } from "../context.js";
 
@@ -156,6 +157,7 @@ async function runWork(
     const startSha = await headSha(dir);
 
     const report = await runJuniorCmd(
+      resolveJuniorCmd(store),
       workPrompt({
         repoFull: task.repo,
         issue: task.issue,
@@ -165,6 +167,7 @@ async function runWork(
         contextPacket: packet,
       }),
       dir,
+      juniorGitEnv(store),
       (usd, inT, outT) => store.recordSpend(task.repo, task.issue, config.juniorAgent, "work", usd, inT, outT)
     );
 
@@ -245,6 +248,7 @@ async function runRevision(
     const startSha = await headSha(dir);
 
     const report = await runJuniorCmd(
+      resolveJuniorCmd(store),
       revisionPrompt({
         repoFull: task.repo,
         issue: task.issue,
@@ -254,6 +258,7 @@ async function runRevision(
         threads: threads.open,
       }),
       dir,
+      juniorGitEnv(store),
       (usd, inT, outT) => store.recordSpend(task.repo, task.issue, config.juniorAgent, "revision", usd, inT, outT)
     );
 
@@ -351,9 +356,9 @@ async function fail(task: TaskRow, store: Store, octokit: Octokit, reason: strin
 }
 
 /** Run the junior CLI in the workspace; parse its JSON self-report (tolerantly). */
-async function runJuniorCmd(prompt: string, cwd: string, onMetrics?: (usd: number, inT: number, outT: number) => void): Promise<JuniorReport> {
+async function runJuniorCmd(cmd: string, prompt: string, cwd: string, env?: Record<string, string>, onMetrics?: (usd: number, inT: number, outT: number) => void): Promise<JuniorReport> {
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(config.juniorCmd, { shell: true, cwd, windowsHide: true });
+    const child = spawn(cmd, { shell: true, cwd, windowsHide: true, env: env ? { ...process.env, ...env } : process.env });
     // Guard against EPIPE/EINVAL if the process dies before/while we write stdin.
     child.stdin.on("error", () => {});
     let out = "";

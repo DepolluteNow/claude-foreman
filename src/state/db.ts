@@ -28,6 +28,8 @@ export interface CommentRow {
   msg_type: string | null; // agent-msg type if it was a protocol message
   msg_from: string | null;
   created_at: number;
+  body: string | null; // full comment text, so the dashboard can show more than the snippet
+  url: string | null; // html_url of the original comment on GitHub
 }
 
 export interface RevisionPointRow {
@@ -132,6 +134,14 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(repo, issue, created_at);
     `);
+    // Older databases predate the full-body/url columns — add them in place.
+    for (const col of ["body TEXT", "url TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE comments ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS revision_points (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,13 +228,13 @@ export class Store {
       });
   }
 
-  recordComment(c: Omit<CommentRow, "created_at" | "msg_type" | "msg_from"> & Partial<CommentRow>): void {
+  recordComment(c: Omit<CommentRow, "created_at" | "msg_type" | "msg_from" | "body" | "url"> & Partial<CommentRow>): void {
     this.db
       .prepare(
-        `INSERT INTO comments (repo, issue, author, snippet, msg_type, msg_from, created_at)
-         VALUES (@repo, @issue, @author, @snippet, @msg_type, @msg_from, @created_at)`
+        `INSERT INTO comments (repo, issue, author, snippet, msg_type, msg_from, created_at, body, url)
+         VALUES (@repo, @issue, @author, @snippet, @msg_type, @msg_from, @created_at, @body, @url)`
       )
-      .run({ msg_type: null, msg_from: null, created_at: Date.now(), ...c });
+      .run({ msg_type: null, msg_from: null, created_at: Date.now(), body: null, url: null, ...c });
   }
 
   /** Latest recorded comment on the task's issue or its PR thread. */
