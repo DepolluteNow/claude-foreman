@@ -5,6 +5,7 @@ import { taskBranch } from "./protocol/labels.js";
 import type { BranchState, CiState, ThreadOverview, ThreadSummary } from "./threads.js";
 import type { TrustTier } from "./referee/readiness.js";
 import { COACH_BACKENDS, ENV_DEFAULT_KEY, resolveCoachBackend } from "./manager/coach-backends.js";
+import { ringPanel } from "./ringmap.js";
 
 const NO_THREADS: ThreadOverview = { open: [], resolvedCount: 0, total: 0 };
 
@@ -607,8 +608,11 @@ export function renderDashboard(
     </p>
   </section>`;
 
+  const archiveBtn = `<form method="post" action="/dashboard/archive-stale" style="margin-left:auto" onsubmit="return confirm('Archive everything untouched for 7+ days? Each task flips to Stopped and can be relaunched from its project card.')">
+        <button type="button" onclick="this.closest('form').requestSubmit()" style="margin:0;padding:0.3rem 0.9rem;font-size:0.8rem;background:transparent;color:#d29922;border:1px solid #d2992288">🧹 Archive stale (7+ days)</button>
+      </form>`;
   const attentionHtml = attention.length
-    ? `<section class="card attention"><h2>👋 Needs you</h2><ul>${attention.join("")}</ul></section>`
+    ? `<section class="card attention"><div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap"><h2 style="margin:0">👋 Needs you</h2>${archiveBtn}</div><ul>${attention.join("")}</ul></section>`
     : `<section class="card calm"><h2>✅ Nothing needs you right now</h2><p>${
         working > 0
           ? `Your AI team is working on ${working} thing${working > 1 ? "s" : ""}. Check back later.`
@@ -722,9 +726,10 @@ export function renderDashboard(
   <h1>🤖 My AI team</h1>
   <p class="subtitle">${agentName(config.agents[0] ?? "")}${config.agents.length > 1 ? " and " + config.agents.slice(1).map(agentName).join(", ") : ""} do the work · a coach checks everything · you approve the results</p>
   ${notice ? `<p class="notice">${esc(notice)}</p>` : ""}
+  ${ringPanel(store)}
+  ${attentionHtml}
   ${coachPanel(store)}
   ${costHtml}
-  ${attentionHtml}
   ${projects}
   <section class="card">
     <h2>🚀 Request new work</h2>

@@ -14,6 +14,7 @@ import { sweepAutoMerge } from "./automerge.js";
 import { startJunior } from "./junior/runner.js";
 import { startWorker } from "./manager/worker.js";
 import { isValidCoachKey, setCoachBackend } from "./manager/coach-backends.js";
+import { renderRingSvg } from "./ringmap.js";
 import { Store } from "./state/db.js";
 import { recoverFromCrash, rebuildCacheFromGitHub } from "./state/sync.js";
 
@@ -247,6 +248,38 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
         return true;
       }
 
+      // The Ring Map fragment — polled by the dashboard every 8s for a live view.
+      if (req.method === "GET" && path === "/api/ring") {
+        res.writeHead(200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "no-store" });
+        res.end(renderRingSvg(store));
+        return true;
+      }
+
+      // Archive everything inactive for 7+ days so the board reflects reality,
+      // not a graveyard of old runs. Tasks flip to 'stopped' (relaunchable).
+      if (req.method === "POST" && path === "/dashboard/archive-stale") {
+        try {
+          const cutoff = Date.now() - 7 * 24 * 3600_000;
+          const stale = store
+            .listTasks()
+            .filter((t) => ["queued", "claimed", "in_review", "changes_requested", "approved", "failed"].includes(t.status) && t.updated_at < cutoff);
+          for (const t of stale) {
+            store.updateTask(t.repo, t.issue, { status: "stopped", lease_expires_at: null });
+          }
+          res.writeHead(303, {
+            location: "/dashboard?notice=" + encodeURIComponent(
+              stale.length ? `Archived ${stale.length} stale task(s) — relaunch any of them from its project card.` : "Nothing stale to archive."
+            ),
+          });
+          res.end();
+        } catch (e) {
+          probot.log.error(`archive-stale failed: ${e}`);
+          res.writeHead(303, { location: "/dashboard?err=" + encodeURIComponent("archive failed — see server log") });
+          res.end();
+        }
+        return true;
+      }
+
       // Live-switch which model plays Coach — takes effect on the next dispatch, no restart.
       if (req.method === "POST" && path === "/dashboard/set-coach") {
         (async () => {
@@ -439,7 +472,14 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
 
   const tick = startWorker(store, auth, log);
   const juniorTick = startJunior(store, auth, log);
-  const workerTimer = setInterval(() => void tick(), WORKER_INTERVAL_MS);
+  // Heartbeat: stamp every tick so the Ring Map can prove the engine is alive
+  // (or say loudly that it isn't) — the owner's #1 trust question.
+  const beatAndTick = () => {
+    store.setSetting("last_worker_tick", String(Date.now()));
+    void tick();
+  };
+  beatAndTick();
+  const workerTimer = setInterval(beatAndTick, WORKER_INTERVAL_MS);
   let sweeping = false;
   const sweepTimer = setInterval(async () => {
     if (sweeping) return; // skip if the previous (async, network-bound) sweep is still running
