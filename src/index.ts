@@ -13,6 +13,7 @@ import { sweepRateLimitRecoveries } from "./agentlimits.js";
 import { sweepAutoMerge } from "./automerge.js";
 import { startJunior } from "./junior/runner.js";
 import { startWorker } from "./manager/worker.js";
+import { isValidCoachKey, setCoachBackend } from "./manager/coach-backends.js";
 import { Store } from "./state/db.js";
 import { recoverFromCrash, rebuildCacheFromGitHub } from "./state/sync.js";
 
@@ -241,6 +242,32 @@ export default function app(probot: Probot, { addHandler }: Partial<ApplicationF
         })().catch((e) => {
           probot.log.error(`handoff-note failed: ${e}`);
           res.writeHead(303, { location: "/dashboard?err=" + encodeURIComponent("couldn't save the note — see server log") });
+          res.end();
+        });
+        return true;
+      }
+
+      // Live-switch which model plays Coach — takes effect on the next dispatch, no restart.
+      if (req.method === "POST" && path === "/dashboard/set-coach") {
+        (async () => {
+          let body = "";
+          for await (const chunk of req) {
+            body += chunk;
+            if (body.length > 65536) { res.writeHead(413, { "content-type": "text/plain" }); res.end("Request Entity Too Large"); return; }
+          }
+          const params = new URLSearchParams(body);
+          const coach = (params.get("coach") ?? "").trim();
+          if (!isValidCoachKey(coach)) {
+            res.writeHead(303, { location: "/dashboard?err=" + encodeURIComponent("unknown Coach backend") });
+            res.end();
+            return;
+          }
+          setCoachBackend(store, coach);
+          res.writeHead(303, { location: "/dashboard?notice=" + encodeURIComponent("Coach switched.") });
+          res.end();
+        })().catch((e) => {
+          probot.log.error(`set-coach failed: ${e}`);
+          res.writeHead(303, { location: "/dashboard?err=" + encodeURIComponent("couldn't switch coach — see server log") });
           res.end();
         });
         return true;

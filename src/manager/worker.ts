@@ -112,6 +112,7 @@ async function runDecompose(job: JobRow, store: Store, octokit: Octokit): Promis
       agents: config.agents,
       repo: job.repo,
     }),
+    store,
     (usd, inT, outT) => store.recordSpend(job.repo, job.issue, config.managerName, "decompose", usd, inT, outT)
   );
 
@@ -192,6 +193,7 @@ async function runDiscuss(job: JobRow, store: Store, octokit: Octokit): Promise<
       epicBody: guardIssueBody(epic.body ?? "", `${job.repo}#${job.issue}`),
       comments: comments.map(c => ({ author: c.user?.login ?? "unknown", body: c.body ?? "" })),
     }),
+    store,
     (usd, inT, outT) => store.recordSpend(job.repo, job.issue, config.managerName, "discuss", usd, inT, outT)
   );
 
@@ -319,6 +321,7 @@ async function runReview(job: JobRow, store: Store, octokit: Octokit): Promise<{
       round,
       openPoints: openPoints.map((p) => p.text),
     }),
+    store,
     (usd, inT, outT) => store.recordSpend(job.repo, job.issue, config.managerName, "review", usd, inT, outT)
   );
 
