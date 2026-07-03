@@ -2,19 +2,27 @@ import { spawn } from "node:child_process";
 import { config } from "../config.js";
 import { parseRateLimit, RateLimitedError } from "../ratelimit.js";
 import { scanOutput } from "../guard/secretscan.js";
+import { resolveCoachBackend } from "./coach-backends.js";
+import type { Store } from "../state/db.js";
 
 /**
- * Invoke the manager model (headless Claude Code by default) with a prompt on
- * stdin and parse a JSON object from its output. The Claude Code CLI with
- * `--output-format json` wraps the answer in an envelope `{ result: "..." }`;
- * we unwrap that, strip code fences, and parse.
+ * Invoke the current Coach backend (live-switchable from the dashboard —
+ * Hermes, Claude Fable, or whatever MANAGER_CMD says in .env if never
+ * touched) with a prompt on stdin and parse a JSON object from its output.
+ * The Claude Code CLI with `--output-format json` wraps the answer in an
+ * envelope `{ result: "..." }`; we unwrap that, strip code fences, and parse.
  */
-export async function runManager<T>(prompt: string, onMetrics?: (usd: number, inT: number, outT: number) => void): Promise<T> {
+export async function runManager<T>(prompt: string, store?: Store, onMetrics?: (usd: number, inT: number, outT: number) => void): Promise<T> {
   if (config.managerDisabled) {
     throw new ManagerUnavailableError("MANAGER_DISABLED=1");
   }
+  // Callers without a Store (the not-yet-wired CoachDriver track, debug scripts)
+  // keep the pre-existing behaviour: always config.managerCmd, no live switch.
+  const coach = store
+    ? resolveCoachBackend(store)
+    : { key: "env-default", label: "env default (no store)", cmd: config.managerCmd, isEnvDefault: true };
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(config.managerCmd, { shell: true, windowsHide: true });
+    const child = spawn(coach.cmd, { shell: true, windowsHide: true });
     // Guard against EPIPE/EINVAL if the process dies before/while we write stdin.
     child.stdin.on("error", () => {});
     let out = "";
@@ -33,7 +41,7 @@ export async function runManager<T>(prompt: string, onMetrics?: (usd: number, in
       else
         reject(
           new Error(
-            `manager exited with code ${code}; stderr: ${err.slice(0, 1000) || "<empty>"}; stdout: ${out.slice(0, 2000) || "<empty>"}`
+            `manager (${coach.label}) exited with code ${code}; stderr: ${err.slice(0, 1000) || "<empty>"}; stdout: ${out.slice(0, 2000) || "<empty>"}`
           )
         );
     });

@@ -155,6 +155,13 @@ export class Store {
       );
     `);
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS handoff_notes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         note TEXT NOT NULL,
@@ -402,6 +409,21 @@ export class Store {
 
   listAgentStatus(): AgentStatusRow[] {
     return this.db.prepare(`SELECT * FROM agent_status ORDER BY agent`).all() as AgentStatusRow[];
+  }
+
+  /** Generic settings store — currently used for the live-switchable Coach backend. */
+  getSetting(key: string): string | undefined {
+    const row = this.db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      )
+      .run(key, value, Date.now());
   }
 
   /**

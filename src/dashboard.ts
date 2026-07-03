@@ -4,6 +4,7 @@ import type { CommentRow, JobRow, RevisionPointRow, Store, TaskRow } from "./sta
 import { taskBranch } from "./protocol/labels.js";
 import type { BranchState, CiState, ThreadOverview, ThreadSummary } from "./threads.js";
 import type { TrustTier } from "./referee/readiness.js";
+import { COACH_BACKENDS, ENV_DEFAULT_KEY, resolveCoachBackend } from "./manager/coach-backends.js";
 
 const NO_THREADS: ThreadOverview = { open: [], resolvedCount: 0, total: 0 };
 
@@ -560,6 +561,29 @@ function handoffPanel(store: Store): string {
   </section>`;
 }
 
+// ---------------------------------------------------------------------------
+// Coach panel — live-switchable Coach backend (M... : dashboard-driven, no restart)
+// ---------------------------------------------------------------------------
+
+function coachPanel(store: Store): string {
+  const current = resolveCoachBackend(store);
+  const options = [
+    { key: ENV_DEFAULT_KEY, label: "Current .env default" },
+    ...COACH_BACKENDS.map((b) => ({ key: b.key, label: b.label })),
+  ]
+    .map((o) => `<option value="${esc(o.key)}"${o.key === current.key ? " selected" : ""}>${esc(o.label)}</option>`)
+    .join("");
+  return `<section class="card coach-panel">
+    <h2>🎙️ Coach</h2>
+    <p class="point-meta">Whichever model is picked here reviews and approves every Fighter's work — switch takes effect on the next dispatch, no restart needed.</p>
+    <div class="coach-current">Right now: <strong>${esc(current.label)}</strong></div>
+    <form method="post" action="/dashboard/set-coach" class="coach-form">
+      <select name="coach">${options}</select>
+      <button type="submit">Switch</button>
+    </form>
+  </section>`;
+}
+
 export function renderDashboard(
   store: Store,
   repos: RepoOption[],
@@ -677,6 +701,10 @@ export function renderDashboard(
   button { margin-top: 0.9rem; font: inherit; font-weight: 600; padding: 0.55rem 1.4rem; border-radius: 8px; border: none; background: #2da44e; color: white; cursor: pointer; }
   button:hover { filter: brightness(1.08); }
   .notice { border: 1px solid #2da44e88; background: #2da44e15; border-radius: 8px; padding: 0.7rem 1rem; }
+  .coach-panel .coach-current { margin: 0.3rem 0 0.7rem; }
+  .coach-form { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  .coach-form select { width: auto; flex: 1 1 220px; }
+  .coach-form button { margin: 0; }
   .cost-panel .cost-total { font-size: 1rem; margin: 0.3rem 0 0.5rem; }
   .cost-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
   .cost-table th, .cost-table td { padding: 0.3rem 0.6rem; text-align: left; border-bottom: 1px solid #8882; }
@@ -694,6 +722,7 @@ export function renderDashboard(
   <h1>🤖 My AI team</h1>
   <p class="subtitle">${agentName(config.agents[0] ?? "")}${config.agents.length > 1 ? " and " + config.agents.slice(1).map(agentName).join(", ") : ""} do the work · a coach checks everything · you approve the results</p>
   ${notice ? `<p class="notice">${esc(notice)}</p>` : ""}
+  ${coachPanel(store)}
   ${costHtml}
   ${attentionHtml}
   ${projects}
