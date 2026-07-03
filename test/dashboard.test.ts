@@ -155,15 +155,14 @@ describe("trustTierPanel", () => {
 });
 
 describe("renderDashboard", () => {
-  it("renders the cost forecast section at the top", () => {
+  it("renders the cost panel in The Corner", () => {
     const store = new Store(":memory:");
     const html = renderDashboard(store, [], undefined, {}, {}, {});
-    expect(html).toContain("Cost forecast");
     expect(html).toContain("No budget ceiling configured");
     expect(html).toContain("[cost]");
   });
 
-  it("renders the per-repo trust tier next to the project name", () => {
+  it("renders the per-repo trust tier in the poster when a card is selected", () => {
     const store = new Store(":memory:");
     store.upsertTask({
       repo: "o/r",
@@ -173,8 +172,8 @@ describe("renderDashboard", () => {
       status: "queued",
       title: "Task one",
     });
-    const html = renderDashboard(store, [], undefined, {}, {}, { "o/r": "L2" });
-    expect(html).toContain("Trust tier: L2");
+    const html = renderDashboard(store, [], undefined, {}, {}, { "o/r": "L2" }, "o/r");
+    expect(html).toContain("trust L2");
   });
 
   it("defaults to L1 when no trust tier is provided", () => {
@@ -187,7 +186,7 @@ describe("renderDashboard", () => {
       status: "queued",
       title: "Task one",
     });
-    const html = renderDashboard(store, [], undefined);
-    expect(html).toContain("Trust tier: L1");
+    const html = renderDashboard(store, [], undefined, {}, {}, {}, "o/r");
+    expect(html).toContain("trust L1");
   });
 });
