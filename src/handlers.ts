@@ -51,6 +51,8 @@ export async function onComment(ctx: Context<"issue_comment.created">, store: St
     msg_type: parsed?.type ?? null,
     msg_from: parsed?.from ?? null,
     created_at: Date.parse(ctx.payload.comment.created_at) || Date.now(),
+    body: body.replace(/<!--[\s\S]*?-->/g, "").trim().slice(0, 10000),
+    url: ctx.payload.comment.html_url ?? null,
   });
 
   // Human command: /fight on any issue (formerly /decompose)
