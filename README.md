@@ -14,7 +14,16 @@
 
 > The Coach thinks. open weight models type. Foreman makes sure it's done right.
 
-An autonomous coding supervisor that routes GitHub issues to free AI models (Kimi, Gemini) running in Windsurf, Antigravity, or Cursor — while the Coach handles decomposition, review, and escalation.
+Foreman is a **GitHub-native autonomous coding supervisor**. It is a [Probot](https://probot.github.io/)
+GitHub App that watches a repository's issues and labels, wakes the matching **Fighter** adapter
+to implement a grilled issue brief, opens a PR, and gates the merge behind Coach review and a
+deterministic Referee gate. Work flows as a queue of GitHub issues:
+**dispatch → grill → implement → review → merge**.
+
+Dispatch is driven by **GitHub labels** (`agent:devin`, `agent:cursor`, `agent:ollama`,
+`agent:devin-local`, `agent:api`), not by local IDE automation. Each label maps to a pluggable
+Fighter adapter that knows how to wake one runtime. The Coach (a senior model) stays strategic —
+scope, briefs, review — while free/cheap Fighters do the tactical typing.
 
 <p align="center">
   <img src="docs/assets/how-it-works.svg" alt="How Foreman works — the governed loop: a GitHub issue goes to the Corner (Claude plans), into the Ring (open weight models write the code), through the Referee (tests + Coach verdict gate), and out as a merged PR or an escalation to you." width="100%">
@@ -28,179 +37,137 @@ An autonomous coding supervisor that routes GitHub issues to free AI models (Kim
 
 ## Requirements
 
-- **macOS** (dispatch uses `windsurf chat` CLI + AppleScript fallback)
-- **Python 3.10+**
-- **[`gh` CLI](https://cli.github.com/)** — authenticated (`gh auth login`)
-- **Windsurf** and/or **Antigravity** installed in `/Applications/`
-- **Claude Code** with the `/claude-foreman` skill installed (see below)
+- **Node.js** (a modern LTS, ≥ 20) and npm
+- A **GitHub App** installed on the target repository, with:
+  - App ID
+  - Private key
+  - Webhook secret
+  - These are supplied to the Probot app via the standard Probot environment variables
+    (`APP_ID`, `PRIVATE_KEY`, `WEBHOOK_SECRET`). Never commit real secrets to the repo —
+    provide them through your runtime secret store / GitHub Actions secrets.
+- **[`gh` CLI](https://cli.github.com/)** — authenticated (`gh auth login`), for local dev and testing
 
-## Install
+## Install & Run
 
 ```bash
-git clone https://github.com/DepolluteNow/claude-foreman.git
+git clone https://github.com/hayssamhob/claude-foreman.git
 cd claude-foreman
-pip install -e .
-foreman --help   # verify
-```
-
-## Install the Claude Code Skill
-
-The `/claude-foreman` skill is what Claude uses to drive the `foreman` CLI.
-Install it globally so it's available in every project:
-
-```bash
-mkdir -p ~/.claude/skills/claude-foreman
-cp .claude/skills/claude-foreman/SKILL.md ~/.claude/skills/claude-foreman/SKILL.md
-```
-
-Then in any Claude Code session, type `/claude-foreman` to invoke it.
-
-## Install the VS Code Bridge Extension (optional but recommended)
-
-The foreman-bridge extension gives Claude live IDE state (branch, diagnostics, file saves).
-Without it, pre-flight checks are skipped and timeout diagnosis is limited.
-
-```bash
-cd extension/foreman-bridge
 npm install
 npm run build
-# Then install the .vsix in Windsurf / VS Code:
-# Extensions → ··· → Install from VSIX → pick out/foreman-bridge-*.vsix
 ```
 
-## Devin Desktop LLM Gateway (Proxy)
+Run the Probot app in production (requires the Probot env vars above):
 
-`claude-foreman` now includes a built-in proxy that turns the **Devin Desktop App** into a local, OpenAI-compatible API. This allows you to use Devin's powerful open weight models (like `kimi-k2.7`, `glm-5.2`, `swe-1.6`) directly inside Hermes, Antigravity, or any other API client—without API rate limits!
-
-To start the proxy:
 ```bash
-npm run devin-proxy
-```
-The server will run on `http://localhost:3001/v1`. 
-
-To configure Hermes to use it:
-1. Run `hermes model`
-2. Select `custom (direct API)`
-3. Set the base URL to `http://localhost:3001/v1`
-4. Pick your desired model from the menu.
-
-## Quick Start
-
-Once installed, open Claude Code in any project and run:
-
-```
-/claude-foreman owner/repo#42
+npm run start
 ```
 
-Claude will fetch the issue, create a branch, dispatch to Windsurf, wait for a commit, verify the diff and closing reference, and optionally create a PR — all automatically.
+Run locally with hot-reload via `tsx` (no build step needed):
 
-Or dispatch multiple issues while you sleep:
-
-```
-/claude-foreman queue owner/repo#42 owner/repo#43 owner/repo#44
-```
-
-## How It Works
-
-Every dispatch cycle is 3 tool calls and costs ~1,300 Claude tokens:
-
-| Phase | What happens | Cost |
-|-------|-------------|------|
-| **Phase 1** `dispatch-issue` | Fetch issue, create branch, dirty-check, open IDE, send prompt | ~400 tokens |
-| **Phase 2** `wait` | Poll `git log` until new commit detected; auto-create PR | ~400 tokens |
-| **Phase 3** `verify` | Diff summary, closing-ref check, optional test run | ~500 tokens |
-
-The open weight models (Kimi, Gemini) does all the actual coding — zero tokens for that part.
-
-## Workflows
-
-### Dispatch an existing issue
 ```bash
-/claude-foreman owner/repo#42
+npm run dev
 ```
 
-### Create an issue and dispatch it in one shot
+The app reacts to GitHub webhook events (issue labels, comments, pull requests, PR closes) and
+drives the loop. It is **not** a slash-command CLI — there is no `foreman dispatch` or
+`foreman wait`; dispatch, review, and merge are the App's job, triggered by GitHub events.
+
+## CLI: `foreman` (scaffolding helper)
+
+The `foreman` binary (installed from `bin/foreman.js` via `package.json`) is a **scaffolding
+helper**, not a dispatch CLI. It does not dispatch, wait, or verify issues — that is the App's
+job. It currently supports:
+
 ```bash
-/claude-foreman create owner/repo "Add dark mode toggle"
-```
-Claude writes the spec, creates the issue on GitHub, and dispatches immediately.
-
-### Queue multiple issues end-to-end
-```bash
-/claude-foreman queue owner/repo#42 owner/repo#43 owner/repo#44
+foreman init                 # scaffold loop-budget.md + loop-run-log.md in the current repo
+foreman init --pattern <name># scaffold a standing GitHub Actions workflow + README from a recipe in recipes/
+foreman patterns             # list available recipes from recipes/
 ```
 
-### Dispatch a task file (no GitHub issue needed)
-```bash
-/claude-foreman .tasks/010-auth-flow.md
-```
-
-## Safety Guards
-
-Every dispatch automatically enforces:
-
-- **Dirty worktree check** — refuses to dispatch if uncommitted changes exist
-- **Pre-flight** — verifies IDE is on the correct branch (no wrong-window dispatch)
-- **HEAD-hash wait** — `foreman wait` compares git HEAD, not `--since` (no false positives)
-- **Closing reference check** — `foreman verify` confirms commit contains `closes #N`
-- **Timeout diagnosis** — on timeout, takes a screenshot + queries bridge `/health`
+Recipes live in `recipes/` (e.g. `pr-babysitter`, `daily-triage`, `ci-sweeper`,
+`dependency-sweeper`, `issue-triage`, `post-merge-cleanup`, `changelog-drafter`).
 
 ## Architecture
 
 ```
-foreman/
-├── cli.py                  # foreman CLI (11 commands)
-├── github.py               # gh CLI wrappers (fetch, branch, PR, comment)
-├── bridge_interface.py     # Abstract IDE bridge interface
-├── config.py               # IDE registry, model catalog
-├── models.py               # Model routing heuristics
-├── drivers/
-│   ├── cascade_bridge.py   # Windsurf (windsurf chat CLI + AppleScript fallback)
-│   ├── gemini_bridge.py    # Antigravity
-│   ├── cursor_bridge.py    # Cursor
-│   └── applescript/        # macOS automation scripts
-├── ring/
-│   ├── loop.py             # Supervisor state machine
-│   ├── router.py           # Task complexity classifier
-│   ├── watcher.py          # git-based completion detector
-│   ├── state.py            # Session persistence (~/.claude/foreman-state.json)
-│   ├── takeover.py         # Circle detection (same-region / same-error / net-zero)
-│   └── learnings.py        # Adaptive routing from past sessions
-└── comms/
-    └── telegram.py         # Escalation message formatting
+src/
+├── index.ts              # Probot app entry — webhook handlers, sweepers, worker/junior loops
+├── automerge.ts          # the merge gate: CI, threads, hold label, trust tier, preview
+├── handlers.ts           # webhook event handlers (comments, epic labels, PRs, PR close)
+├── github.ts             # GitHub API wrappers (post messages, set labels, split repo)
+├── threads.ts            # PR review-thread / CI / changed-files state
+├── dashboard.ts          # live fleet board rendering
+├── config.ts             # runtime config (DB path, installation id, etc.)
+├── dispatch/             # wake-up layer — one FighterAdapter per runtime
+│   ├── adapter.ts        #   the FighterAdapter contract + shared scope-exclusion helper
+│   ├── devin.ts          #   agent:devin — Devin cloud
+│   ├── devin-local.ts    #   agent:devin-local — Devin CLI, detached local spawn
+│   ├── cursor.ts         #   agent:cursor — Cursor CLI
+│   ├── ollama.ts         #   agent:ollama — local Ollama via HTTP API
+│   ├── api.ts            #   agent:api — BYO-key OpenAI-compatible endpoint
+│   ├── fusion.ts         #   fusion:on — two Fighters on one issue
+│   └── capacity.ts       #   per-agent concurrency limits
+├── drivers/              # Coach + Fighter driver implementations
+│   ├── coach.ts          #   Coach driver contract
+│   ├── coach-claude.ts   #   Claude Coach
+│   ├── coach-codex.ts    #   Codex CLI Coach
+│   ├── coach-gemini.ts   #   Gemini CLI Coach
+│   ├── council.ts        #   council recipe (multi-Coach)
+│   ├── fighter.ts        #   Fighter driver
+│   ├── api.ts            #   BYO-key API driver (OpenAI-compatible)
+│   ├── claude.ts         #   Claude driver
+│   ├── fusion.ts         #   fusion driver
+│   └── recipe-router.ts  #   routes a recipe to the right driver
+├── referee/              # the merge gate's checks
+│   ├── checks.ts         #   CI / threads / hold / trust / preview gate checks
+│   ├── trust-gate.ts     #   risk classification + trust gate
+│   ├── trust-tier.ts     #   trust:L1/L2/L3 ladder
+│   ├── claimcheck.ts     #   deterministic claim verification (no senior tokens)
+│   ├── circle.ts         #   circle detection (same-region / same-error / net-zero)
+│   ├── readiness.ts      #   PR readiness state
+│   ├── stall.ts          #   stall detection
+│   ├── prefilter.ts      #   pre-review filter
+│   ├── outcome.ts        #   outcome classification
+│   ├── evolution.ts      #   routing-weight evolution
+│   ├── preview-mcp.ts    #   MCP preview gate
+│   └── test-grounded-judge.ts # test-grounded verdict
+├── guard/                # safety guards
+│   ├── bash.ts           #   shell command guard
+│   ├── exclusion.ts      #   hard-scope exclusion (auth/payments/secrets/migrations)
+│   ├── secretscan.ts     #   secret-scan hook on Fighter output
+│   └── untrusted.ts      #   untrusted-input handling (G3: never feed raw issue/PR text)
+├── loop/
+│   └── discovery.ts      # loop queue discovery
+├── manager/              # the Coach loop worker
+│   ├── worker.ts         #   the manager worker (polls the queue, drives the loop)
+│   ├── runner.ts         #   run loop iteration
+│   └── prompts.ts        #   Coach prompt assembly
+├── junior/               # the junior/Fighter runner
+│   ├── runner.ts         #   junior loop runner
+│   ├── git.ts            #   git operations
+│   └── prompts.ts        #   Fighter prompt assembly
+├── state/                # SQLite-backed state (better-sqlite3)
+│   ├── db.ts             #   the Store: tasks, PRs, leases, cache
+│   └── sync.ts           #   crash recovery + cache rebuild from GitHub
+├── protocol/             # label + message conventions
+│   ├── labels.ts         #   agent:X, status:X, trust:L1/L2/L3, epic:M*, branch naming
+│   └── messages.ts       #   canonical comment templates
+└── skill/
+    └── foreman-skill.ts  # foreman skill generation
 
-extension/
-└── foreman-bridge/         # VS Code extension — exposes IDE state over HTTP
-    └── src/extension.ts    # /git, /health, /files, /diagnostics endpoints
+bin/foreman.js            # the `foreman` CLI binary (scaffolding only — see CLI section)
+recipes/                  # standing-loop recipes consumed by `foreman init --pattern`
+test/                     # Vitest test suite
 ```
-
-## Token Budget
-
-| Workflow | Tool calls | Est. tokens |
-|----------|-----------|-------------|
-| Dispatch issue + wait + verify | 3 | ~1,300 |
-| Create-and-dispatch + wait + verify | 3 | ~1,400 |
-| Queue (N issues) | 1 | ~500 + N×200 |
-| Task file (preflight + dispatch + wait + verify) | 4 | ~1,600 |
-
-At $15/M tokens (Claude Sonnet), dispatching 10 issues costs under $0.20 in Claude tokens.
-The open weight models (Kimi, Gemini) write all the code at $0.
-
-## Self-Improvement
-
-After each session, Foreman runs a retrospective:
-- Measures first-try rate per model per task type
-- Updates routing weights (adaptive routing)
-- Guards against regressions — reverts routing changes if success rate drops
-- Persists to `~/.claude/foreman-learnings.json`
 
 ## Tests
 
 ```bash
-python -m pytest tests/foreman/ -v   # 115 tests, <1s
+npm test        # vitest run
 ```
 
-CI runs on Python 3.10, 3.11, 3.12, and 3.13.
+CI runs on Ubuntu, macOS, and Windows via GitHub Actions. (Windows can fail on the native
+`better-sqlite3` build — a known false negative, not a real regression.)
 
 ## License
 
