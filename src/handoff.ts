@@ -33,6 +33,8 @@ function statusPhrase(t: TaskRow): string {
   switch (t.status) {
     case "queued":
       return "⏳ queued";
+    case "dispatched":
+      return "📨 dispatched — waiting for claim";
     case "claimed":
       return "🔧 in progress";
     case "in_review":
@@ -41,6 +43,8 @@ function statusPhrase(t: TaskRow): string {
       return "✏️ changes requested";
     case "approved":
       return config.autoMerge ? "✅ approved — auto-merging" : "✅ approved — awaiting your merge";
+    case "merged_staging":
+      return "🌿 merged to staging — awaiting main";
     case "done":
       return "✔️ done";
     case "failed":

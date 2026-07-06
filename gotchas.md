@@ -295,3 +295,46 @@ fix what they see.
 3. **Briefs must state the do-not-touch list explicitly.** A Fighter cannot respect a
    boundary it was never told about. List the files/dirs that are off-limits in every
    brief, not just the ones in scope.
+
+---
+
+## G10 — Fighter picks up an issue without reading comments (blind flight collision)
+
+**Symptom.** A Fighter sees an issue in `OPEN` state (or with a stale label), skips
+reading the comment thread, and pushes a branch / opens a PR — duplicating work that
+another agent already completed and merged. The duplicate PR is closed, wasting a full
+build+test cycle.
+
+**First seen.** 2026-06-20 (Falafel.ma epic #520) — Anti-Gravity had a local branch from
+a previous session for issue #521. The Coach had already merged PR #544 to `staging` and
+closed #521, but the issue's `OPEN` status hadn't propagated yet (merges to `staging`
+don't trigger GitHub auto-close). Anti-Gravity saw `OPEN`, skipped `gh issue view 521
+--comments`, pushed its stale branch, and opened PR #545 — a duplicate of the already-
+merged #544.
+
+**Cause.** Three factors combined:
+1. **No `dispatched` status existed** — the only states were `queued` and `claimed`. An
+   issue dispatched but not yet claimed looked identical to an unclaimed one.
+2. **Staging merges don't auto-close issues** — GitHub only auto-closes on merges to
+   `main`. A task merged to `staging` stays `OPEN` until the Coach manually closes it.
+3. **The Fighter skipped the comment thread** — it had local code ready, saw `OPEN`, and
+   rushed without checking what had happened since its last session.
+
+**Rule.**
+1. **Always read the comment thread before picking up an issue.** Run
+   `gh issue view <N> --comments` and scan for Coach instructions, merge announcements,
+   or other agents' done-signals. An `OPEN` status alone is not evidence that work is
+   available.
+2. **Always check for existing PRs.** Run `gh pr list --search "<N>" --state all`. If a
+   PR exists (open or merged), the issue is taken — do not open another one unless the
+   Coach explicitly instructs fusion mode.
+3. **Always check the status label.** Run
+   `gh issue view <N> --json labels --jq '.labels[].name'`. If any `status:dispatched`,
+   `status:claimed`, `status:in-review`, `status:approved`, `status:merged-staging`, or
+   `status:done` label is present, the issue is taken. Stand down.
+4. **The Coach closes issues immediately after staging-merge.** Merges to `staging` do
+   not trigger GitHub auto-close. The Coach MUST manually close the issue and apply
+   `status:merged-staging` right after the merge, not later.
+5. **The `dispatched` status fills the gap** between `queued` and `claimed`. When the
+   Coach assigns a Fighter, the issue gets `status:dispatched` — signaling "taken, work
+   in progress, no PR yet" to any other agent that looks.

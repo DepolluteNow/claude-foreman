@@ -5,10 +5,12 @@ export const LABEL_EPIC = "epic"; // marks an issue for manager decomposition
 
 export type TaskStatus =
   | "queued"
+  | "dispatched" // Coach assigned a Fighter; no PR yet (between queued and claimed)
   | "claimed"
   | "in_review"
   | "changes_requested"
   | "approved"
+  | "merged_staging" // merged to a staging branch; awaiting promotion to main
   | "done"
   | "failed"
   | "stopped"; // halted by the owner; relaunch returns it to queued
@@ -37,10 +39,12 @@ export function parseTaskBranch(ref: string): { agent: string; issue: number } |
 
 export const ALL_STATUS: TaskStatus[] = [
   "queued",
+  "dispatched",
   "claimed",
   "in_review",
   "changes_requested",
   "approved",
+  "merged_staging",
   "done",
   "failed",
   "stopped",
@@ -87,4 +91,44 @@ export function labelDefinitions(agents: string[], holdLabel: string): LabelDef[
     { name: "role:judge", color: "fef2c0", description: "Acting as judge (test-grounded)" },
     { name: "role:writer", color: "fef2c0", description: "Acting as writer (synthesizer)" },
   ];
+}
+
+/**
+ * Statuses that indicate a task is actively being worked on or has been completed.
+ * A Fighter MUST NOT pick up a task in any of these states.
+ * Used by the anti-collision guard (G10) to prevent duplicate work.
+ */
+export const TAKEN_STATUSES: TaskStatus[] = [
+  "dispatched",
+  "claimed",
+  "in_review",
+  "changes_requested",
+  "approved",
+  "merged_staging",
+  "done",
+];
+
+/** True if the status means the task is taken or completed — do not pick up. */
+export function isStatusTaken(status: TaskStatus): boolean {
+  return TAKEN_STATUSES.includes(status);
+}
+
+/**
+ * Valid forward transitions from each status.
+ * Prevents illegal jumps (e.g. queued → done without going through review).
+ */
+export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
+  const transitions: Record<TaskStatus, TaskStatus[]> = {
+    queued: ["dispatched", "claimed", "stopped", "failed"],
+    dispatched: ["claimed", "queued", "stopped", "failed"],
+    claimed: ["in_review", "queued", "stopped", "failed"],
+    in_review: ["changes_requested", "approved", "queued", "stopped", "failed"],
+    changes_requested: ["in_review", "queued", "stopped", "failed"],
+    approved: ["merged_staging", "done", "stopped", "failed"],
+    merged_staging: ["done", "stopped", "failed"],
+    done: [],
+    failed: ["queued", "stopped"],
+    stopped: ["queued"],
+  };
+  return transitions[from]?.includes(to) ?? false;
 }

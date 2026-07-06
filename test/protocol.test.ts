@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { parseMessage, serializeMessage, type AgentMessage } from "../src/protocol/messages.js";
-import { parseTaskBranch, taskBranch } from "../src/protocol/labels.js";
+import {
+  parseTaskBranch,
+  taskBranch,
+  ALL_STATUS,
+  statusLabel,
+  isStatusTaken,
+  isValidTransition,
+} from "../src/protocol/labels.js";
 import { extractJson } from "../src/manager/runner.js";
 
 describe("mailbox messages", () => {
@@ -55,4 +62,44 @@ describe("manager output parsing", () => {
     const envelope = JSON.stringify({ result: "```json\n" + JSON.stringify(inner) + "\n```" });
     expect(extractJson<typeof inner>(envelope)).toEqual(inner);
   });
+});
+
+describe("status label lifecycle", () => {
+  it("includes dispatched and merged_staging in ALL_STATUS", () => {
+    expect(ALL_STATUS).toContain("dispatched");
+    expect(ALL_STATUS).toContain("merged_staging");
+  });
+
+  it("formats dispatched and merged_staging labels correctly", () => {
+    expect(statusLabel("dispatched")).toBe("status:dispatched");
+    expect(statusLabel("merged_staging")).toBe("status:merged-staging");
+  });
+});
+
+describe("isStatusTaken (anti-collision guard)", () => {
+  it("returns true for dispatched", () => expect(isStatusTaken("dispatched")).toBe(true));
+  it("returns true for claimed", () => expect(isStatusTaken("claimed")).toBe(true));
+  it("returns true for in_review", () => expect(isStatusTaken("in_review")).toBe(true));
+  it("returns true for approved", () => expect(isStatusTaken("approved")).toBe(true));
+  it("returns true for merged_staging", () => expect(isStatusTaken("merged_staging")).toBe(true));
+  it("returns true for done", () => expect(isStatusTaken("done")).toBe(true));
+  it("returns false for queued", () => expect(isStatusTaken("queued")).toBe(false));
+  it("returns false for failed", () => expect(isStatusTaken("failed")).toBe(false));
+  it("returns false for stopped", () => expect(isStatusTaken("stopped")).toBe(false));
+});
+
+describe("isValidTransition (status state machine)", () => {
+  it("allows queued → dispatched", () => expect(isValidTransition("queued", "dispatched")).toBe(true));
+  it("allows dispatched → claimed", () => expect(isValidTransition("dispatched", "claimed")).toBe(true));
+  it("allows claimed → in_review", () => expect(isValidTransition("claimed", "in_review")).toBe(true));
+  it("allows approved → merged_staging", () => expect(isValidTransition("approved", "merged_staging")).toBe(true));
+  it("allows merged_staging → done", () => expect(isValidTransition("merged_staging", "done")).toBe(true));
+  it("allows queued → claimed (direct claim without dispatch)", () =>
+    expect(isValidTransition("queued", "claimed")).toBe(true));
+  it("rejects queued → done (skip review)", () => expect(isValidTransition("queued", "done")).toBe(false));
+  it("rejects done → anything", () => expect(isValidTransition("done", "queued")).toBe(false));
+  it("rejects stopped → done (must go through queued first)", () =>
+    expect(isValidTransition("stopped", "done")).toBe(false));
+  it("allows stopped → queued (relaunch)", () => expect(isValidTransition("stopped", "queued")).toBe(true));
+  it("allows failed → queued (retry)", () => expect(isValidTransition("failed", "queued")).toBe(true));
 });

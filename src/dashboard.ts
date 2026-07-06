@@ -99,6 +99,8 @@ function plainStatus(t: TaskRow): { text: string; color: string; action?: { labe
   switch (t.status) {
     case "queued":
       return { text: `Waiting in the corner for ${agent} to pick this up`, color: "#d4a72c" };
+    case "dispatched":
+      return { text: `${agent} was dispatched — waiting for them to step into the ring`, color: "#d4a72c" };
     case "claimed":
       return { text: `${agent} stepped into the ring (started ${since(t.updated_at)})`, color: "#316dca" };
     case "in_review":
@@ -119,6 +121,12 @@ function plainStatus(t: TaskRow): { text: string; color: string; action?: { labe
           };
     case "done":
       return { text: `Done ✓`, color: "#1a7f37" };
+    case "merged_staging":
+      return {
+        text: `Merged to staging — awaiting promotion to main`,
+        color: "#2da44e",
+        action: prUrl ? { label: "Inspect", url: prUrl } : undefined,
+      };
     case "failed":
       return {
         text: `Stuck — the fighter threw in the towel`,

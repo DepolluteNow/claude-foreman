@@ -106,7 +106,10 @@ export async function onComment(ctx: Context<"issue_comment.created">, store: St
 
   if (msg.type === "claim") {
     // Idempotent: re-claim by the same agent just renews the lease.
-    if (task.status !== "queued" && !(task.status === "claimed" && task.agent === msg.from)) {
+    // A dispatched task can only be claimed by the agent it was dispatched to.
+    const isSameAgent = task.agent === msg.from;
+    const isDispatchedForThis = task.status === "dispatched" && isSameAgent;
+    if (task.status !== "queued" && !isDispatchedForThis && !(task.status === "claimed" && isSameAgent)) {
       await postMessage(
         ctx.octokit,
         repo,
@@ -149,6 +152,20 @@ export async function onPullRequest(
   const task = store.getTask(repo, parsed.issue);
   if (!task) return;
 
+  // Collision detection (G10): if a different agent already opened a PR for this
+  // task, warn the Coach instead of silently overwriting the task record.
+  if (task.pr && task.pr !== pr.number && task.agent && task.agent !== parsed.agent) {
+    await postMessage(
+      ctx.octokit,
+      repo,
+      parsed.issue,
+      { v: 1, type: "reassignment", from: config.managerName, to: parsed.agent, task: parsed.issue },
+      `⚠️ Collision detected: @${parsed.agent} opened PR #${pr.number} on issue #${parsed.issue}, ` +
+        `but @${task.agent} already has PR #${task.pr}. Coach must decide which PR to merge. ` +
+        `If this is intentional (fusion mode), add the \`fusion:on\` label.`
+    );
+  }
+
   store.updateTask(repo, parsed.issue, {
     pr: pr.number,
     status: "in_review",
@@ -166,7 +183,7 @@ export async function onPullRequest(
   });
 }
 
-/** PR merged -> task done. */
+/** PR merged -> task done (or merged_staging if base is not main). */
 export async function onPrClosed(ctx: Context<"pull_request.closed">, store: Store): Promise<void> {
   const repo = repoFullName(ctx);
   const pr = ctx.payload.pull_request;
@@ -175,8 +192,24 @@ export async function onPrClosed(ctx: Context<"pull_request.closed">, store: Sto
   const task = store.getTask(repo, parsed.issue);
   if (!task) return;
   if (pr.merged) {
-    store.updateTask(repo, parsed.issue, { status: "done" });
-    await setStatusLabel(ctx.octokit, repo, parsed.issue, "done");
+    // Distinguish staging-merge from main-merge: repos with a staging→main
+    // workflow use merged_staging as an intermediate state so the task isn't
+    // marked done until it reaches main (G10).
+    const baseBranch = pr.base?.ref ?? "main";
+    if (baseBranch === "main") {
+      store.updateTask(repo, parsed.issue, { status: "done" });
+      await setStatusLabel(ctx.octokit, repo, parsed.issue, "done");
+    } else {
+      store.updateTask(repo, parsed.issue, { status: "merged_staging" });
+      await setStatusLabel(ctx.octokit, repo, parsed.issue, "merged_staging");
+      await postMessage(
+        ctx.octokit,
+        repo,
+        parsed.issue,
+        { v: 1, type: "approval", from: config.managerName, to: parsed.agent, task: parsed.issue },
+        `✅ Merged to \`${baseBranch}\`. Awaiting promotion to \`main\` for final done status.`
+      );
+    }
   } else if (task.status !== "stopped") {
     // PR closed without merge: requeue the task (unless the owner stopped it)
     store.updateTask(repo, parsed.issue, { status: "queued", pr: null, lease_expires_at: null });
